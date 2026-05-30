@@ -7,7 +7,7 @@
  */
 (function () {
     // 后端 Spring Boot 统一暴露 /api 前缀，前端所有请求都从这里拼接。
-    const API_BASE = "http://127.0.0.1:8080/api";
+    const API_BASE = window.STOCK_API_BASE || window.API_BASE || "http://127.0.0.1:8080/api";
 
     // 把后端、表格或输入框里的字符串安全转换成数字，处理百分号、逗号和空值。
     function num(value, fallback = 0) {

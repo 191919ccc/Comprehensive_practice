@@ -179,8 +179,12 @@
     </form>
 </section>
 
-<script src="./shared-ui.js?v=shared-20260529"></script>
-<script src="./dashboard-home.js?v=home-20260529"></script>
+<script src="./shared-ui.js?v=shared-20260530"></script>
+<script>
+    (window.DashboardVendor?.ready?.() || Promise.resolve())
+        .catch(error => console.warn("Vendor load failed", error))
+        .finally(() => window.DashboardVendor.loadScript("./dashboard-home.js?v=home-20260530"));
+</script>
 </body>
 </html>
 

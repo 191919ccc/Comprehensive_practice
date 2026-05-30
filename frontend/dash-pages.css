@@ -1,16 +1,14 @@
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
-
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
     min-height: 100vh;
     background: #f4f2ee;
     color: #2c2a27;
-    font-family: "Sora", "Microsoft YaHei", sans-serif;
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
     font-size: 13px;
 }
 
-.mono { font-family: "JetBrains Mono", Consolas, monospace; }
+.mono { font-family: Consolas, "SFMono-Regular", "Liberation Mono", monospace; }
 
 .dash {
     width: min(1480px, calc(100vw - 32px));

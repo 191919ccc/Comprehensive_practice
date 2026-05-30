@@ -1,4 +1,4 @@
-﻿const API_BASE = window.StockShared?.API_BASE || "http://127.0.0.1:8080/api";
+﻿const API_BASE = window.StockShared.API_BASE;
 const page = document.body.dataset.page || "";
 /*
  * 子页面通用脚本。
@@ -1366,6 +1366,3 @@ updateClock();
 setInterval(updateClock, 1000);
 safeRefresh();
 setInterval(safeRefresh, 5000);
-
-
-

@@ -51,7 +51,11 @@
         <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#ff4d6a"></span>高风险股票</div></div><div id="riskList" class="list"></div></article>
     </section>
 </main>
-<script src="./shared-ui.js?v=shared-20260529"></script>
-<script src="./dash-pages.js?v=light-20260502"></script>
+<script src="./shared-ui.js?v=shared-20260530"></script>
+<script>
+    (window.DashboardVendor?.ready?.() || Promise.resolve())
+        .catch(error => console.warn("Vendor load failed", error))
+        .finally(() => window.DashboardVendor.loadScript("./dash-pages.js?v=light-20260530"));
+</script>
 </body>
 </html>

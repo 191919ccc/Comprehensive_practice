@@ -1,4 +1,4 @@
-﻿const API_BASE = window.StockShared?.API_BASE || "http://127.0.0.1:8080/api";
+﻿const API_BASE = window.StockShared.API_BASE;
     /*
      * 首页大屏运行脚本。
      *
@@ -638,31 +638,10 @@
         document.getElementById("aiPanel")?.classList.add("open");
         setTimeout(()=>document.getElementById("aiInput")?.focus(), 50);
     }
-    function sanitizeHtml(html){
-        const template=document.createElement("template");
-        template.innerHTML=html;
-        template.content.querySelectorAll("script,style,iframe,object,embed").forEach(node=>node.remove());
-        template.content.querySelectorAll("*").forEach(node=>{
-            [...node.attributes].forEach(attr=>{
-                const name=attr.name.toLowerCase();
-                const value=String(attr.value||"").trim().toLowerCase();
-                if(name.startsWith("on") || value.startsWith("javascript:")) node.removeAttribute(attr.name);
-            });
-            if(node.tagName==="A"){
-                node.setAttribute("target","_blank");
-                node.setAttribute("rel","noopener noreferrer");
-            }
-        });
-        return template.innerHTML;
-    }
-    // AI 消息支持 Markdown，但渲染前必须复用 shared-ui 的清洗逻辑，避免把后端 HTML 直接写入页面。
+    // AI 消息支持 Markdown，但渲染和清洗只走 shared-ui，保证格式不变且安全逻辑只有一份。
     function renderMarkdown(text){
-        if(window.StockShared?.renderMarkdown) return StockShared.renderMarkdown(text);
         const source=String(text||"");
-        if(window.marked?.parse){
-            marked.setOptions({breaks:true,gfm:true});
-            return sanitizeHtml(marked.parse(source));
-        }
+        if(window.StockShared?.renderMarkdown) return StockShared.renderMarkdown(source);
         return esc(source).replace(/\n/g,"<br>");
     }
     function setAiMessageContent(item, text){
@@ -910,4 +889,3 @@
         renderAlerts(window.latestDashboard?.latest_alerts||[]);
     });
     updateChartModeButtons(); updateClock(); setInterval(updateClock,1000); safeRefresh(); setInterval(safeRefresh,5000);
-
