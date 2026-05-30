@@ -1,0 +1,38 @@
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime configuration and secrets
+python/.env
+*.local
+*.local.yml
+*.local.yaml
+
+# Generated ML artifacts
+python/models/
+*.joblib
+*.pt
+*.pth
+
+# Java build output
+java-backend/target/
+target/
+
+# Runtime logs and temporary output
+logs/
+.runtime/
+reports/
+*.log
+*.tmp
+
+# IDE/editor metadata
+.idea/
+.vscode/
+*.iml
+
+# OS metadata
+Thumbs.db
+.DS_Store

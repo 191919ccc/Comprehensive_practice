@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>市场图表</title>
+    <script src="./vendor-loader.js?v=local-20260529"></script>
+    <script>
+        DashboardVendor.writeScript({local:"./vendor/echarts.min.js", cdn:"https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"});
+        DashboardVendor.writeScript({local:"./vendor/marked.min.js", cdn:"https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"});
+    </script>
+    <link rel="stylesheet" href="./dash-pages.css?v=light-20260502">
+</head>
+<body data-page="market">
+<main class="dash">
+    <header class="header">
+        <section class="header-title">
+            <div class="dot-group"><span class="dot dot-r"></span><span class="dot dot-g"></span><span class="dot dot-b"></span></div>
+            <div><h1 class="title-main">市场图表中心</h1><p class="title-sub">Market Breadth · Sector Heat · Latest Ticks</p></div>
+        </section>
+        <section class="header-status"><span class="live-dot" id="liveDot"></span><span id="streamMode">--</span> | <span id="clock" class="mono">--</span> | <span id="streamState">--</span></section>
+    </header>
+
+    <nav class="nav">
+        <a href="./index.html">预测大屏</a>
+        <a href="./alerts.html">风险告警</a>
+        <a href="./models.html">模型分析</a>
+        <a class="active" href="./market.html">市场图表</a>
+        <a href="./system.html">系统状态</a>
+    </nav>
+
+    <section class="page-hero">
+        <div><p class="eyebrow">Market Map</p><h2>市场宽度与行业热度</h2><p>观察不同市场上涨下跌数量、行业异常热度和最新采集行情，展示实时数据流入后的市场结构变化。</p></div>
+        <div class="status-card"><span class="muted">最新入库</span><strong id="latestEventTime">--</strong><p id="refreshStatus">等待刷新</p></div>
+    </section>
+
+    <section class="kpi-grid">
+        <article class="kpi" style="--accent:#00a8ff"><div class="kpi-label">监控股票</div><div class="kpi-value mono" id="symbolCount">0</div><div class="kpi-note">当前覆盖标的</div></article>
+        <article class="kpi" style="--accent:#ff4d6a"><div class="kpi-label">近 30 分钟告警</div><div class="kpi-value mono" id="alertCount">0</div><div class="kpi-note">市场异常热度</div></article>
+        <article class="kpi" style="--accent:#f0a500"><div class="kpi-label">市场均涨跌</div><div class="kpi-value mono" id="avgChange">0%</div><div class="kpi-note" id="marketBreadth">上涨 0 / 下跌 0</div></article>
+        <article class="kpi" style="--accent:#00e5a0"><div class="kpi-label">近 1 分钟事件</div><div class="kpi-value mono" id="eventsLastMinute">0</div><div class="kpi-note">行情流入速度</div></article>
+    </section>
+
+    <section class="layout-even">
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot"></span>市场涨跌</div></div><div id="marketChart" class="chart"></div></article>
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#f0a500"></span>行业异常</div></div><div id="sectorChart" class="chart"></div></article>
+    </section>
+
+    <section class="panel">
+        <div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#00e5a0"></span>最新入库行情</div></div>
+        <div id="tickList" class="list"></div>
+    </section>
+</main>
+<script src="./shared-ui.js?v=shared-20260529"></script>
+<script src="./dash-pages.js?v=light-20260502"></script>
+</body>
+</html>

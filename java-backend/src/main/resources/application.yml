@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: ${MYSQL_JDBC_URL:jdbc:mysql://127.0.0.1:3306/stock_stream?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+app:
+  ai:
+    model: deepseek-v4-flash
+    api-url: https://api.deepseek.com/v1/chat/completions
+    web-enabled: true
+    web-search-url: https://rsshub.rssforever.com/eastmoney/search/%s
+    # Serper.dev Key，用于开启全网检索 (至关重要)
+    serper-key: ${SERPER_API_KEY:}
+
+  hdfs:
+    output-path: hdfs://localhost:9000/user/fqy/stock_output
+    checkpoint-path: hdfs://localhost:9000/user/fqy/stock_checkpoint

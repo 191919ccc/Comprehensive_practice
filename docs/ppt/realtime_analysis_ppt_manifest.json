@@ -1,0 +1,24 @@
+{
+  "pptxPath": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\实时数据分析模块演讲汇报_代码说明版.pptx",
+  "previewDir": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview",
+  "slideCount": 16,
+  "previews": [
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\01_cover.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\02_architecture.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\03_producer.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\04_spark.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\05_file_map.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\06_code_6.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\07_code_7.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\08_code_8.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\09_code_9.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\10_tables.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\11_alerts.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\12_code_12.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\13_dashboard.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\14_code_14.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\15_stability.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\16_talk_track.png"
+  ],
+  "montage": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_analysis_preview\\montage.png"
+}

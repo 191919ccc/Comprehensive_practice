@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型分析</title>
+    <script src="./vendor-loader.js?v=local-20260529"></script>
+    <script>
+        DashboardVendor.writeScript({local:"./vendor/echarts.min.js", cdn:"https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"});
+        DashboardVendor.writeScript({local:"./vendor/marked.min.js", cdn:"https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"});
+    </script>
+    <link rel="stylesheet" href="./dash-pages.css?v=light-20260502">
+</head>
+<body data-page="models">
+<main class="dash">
+    <header class="header">
+        <section class="header-title">
+            <div class="dot-group"><span class="dot dot-r"></span><span class="dot dot-g"></span><span class="dot dot-b"></span></div>
+            <div><h1 class="title-main">模型分析中心</h1><p class="title-sub">LightGBM · PyTorch LSTM · Ensemble</p></div>
+        </section>
+        <section class="header-status"><span class="live-dot" id="liveDot"></span><span id="streamMode">--</span> | <span id="clock" class="mono">--</span> | <span id="streamState">--</span></section>
+    </header>
+
+    <nav class="nav">
+        <a href="./index.html">预测大屏</a>
+        <a href="./alerts.html">风险告警</a>
+        <a class="active" href="./models.html">模型分析</a>
+        <a href="./market.html">市场图表</a>
+        <a href="./system.html">系统状态</a>
+    </nav>
+
+    <section class="page-hero">
+        <div><p class="eyebrow">Model Lab</p><h2>模型预测效果与信号分布</h2><p>展示 LightGBM、PyTorch LSTM 与综合模型的指标、方向信号和风险排序，说明系统具备数据分析与预测能力。</p></div>
+        <div class="status-card"><span class="muted">最新入库</span><strong id="latestEventTime">--</strong><p id="refreshStatus">等待刷新</p></div>
+    </section>
+
+    <section class="kpi-grid">
+        <article class="kpi" style="--accent:#00a8ff"><div class="kpi-label">近 1 分钟事件</div><div class="kpi-value mono" id="eventsLastMinute">0</div><div class="kpi-note">实时特征输入</div></article>
+        <article class="kpi" style="--accent:#00e5a0"><div class="kpi-label">监控股票</div><div class="kpi-value mono" id="symbolCount">0</div><div class="kpi-note">预测标的池</div></article>
+        <article class="kpi" style="--accent:#ff4d6a"><div class="kpi-label">告警数量</div><div class="kpi-value mono" id="alertCount">0</div><div class="kpi-note">风险排序依据</div></article>
+        <article class="kpi" style="--accent:#f0a500"><div class="kpi-label">市场均涨跌</div><div class="kpi-value mono" id="avgChange">0%</div><div class="kpi-note" id="marketBreadth">上涨 0 / 下跌 0</div></article>
+    </section>
+
+    <section class="layout-two">
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot"></span>模型对比结果</div></div><div id="modelList" class="list"></div></article>
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#b48aff"></span>综合信号分布</div></div><div id="signalChart" class="chart short"></div></article>
+    </section>
+
+    <section class="layout-even">
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#00e5a0"></span>模型优选股票</div></div><div id="optimalList" class="list"></div></article>
+        <article class="panel"><div class="panel-header"><div class="panel-title"><span class="panel-title-dot" style="background:#ff4d6a"></span>高风险股票</div></div><div id="riskList" class="list"></div></article>
+    </section>
+</main>
+<script src="./shared-ui.js?v=shared-20260529"></script>
+<script src="./dash-pages.js?v=light-20260502"></script>
+</body>
+</html>

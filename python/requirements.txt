@@ -1,0 +1,12 @@
+kafka-python==2.0.2
+joblib==1.4.2
+pandas==2.2.3
+PyMySQL==1.1.1
+pyspark==3.5.2
+pytest==8.3.4
+requests==2.32.3
+scikit-learn==1.5.2
+yfinance==0.2.54
+lightgbm==4.6.0
+torch==2.7.1
+akshare>=1.16.0

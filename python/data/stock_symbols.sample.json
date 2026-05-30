@@ -1,0 +1,12 @@
+[
+  { "symbol": "AAPL", "company_name": "Apple Inc.", "category": "\u7f8e\u80a1\u79d1\u6280", "sector": "Consumer Electronics", "market": "NASDAQ" },
+  { "symbol": "MSFT", "company_name": "Microsoft Corporation", "category": "\u7f8e\u80a1\u79d1\u6280", "sector": "Software", "market": "NASDAQ" },
+  { "symbol": "NVDA", "company_name": "NVIDIA Corporation", "category": "\u7f8e\u80a1\u79d1\u6280", "sector": "Semiconductor", "market": "NASDAQ" },
+  { "symbol": "TSLA", "company_name": "Tesla, Inc.", "category": "\u7f8e\u80a1\u65b0\u80fd\u6e90", "sector": "EV", "market": "NASDAQ" },
+  { "symbol": "600519", "company_name": "\u8d35\u5dde\u8305\u53f0", "category": "A\u80a1\u6d88\u8d39\u767d\u9152", "sector": "Liquor", "market": "SH" },
+  { "symbol": "000858", "company_name": "\u4e94\u7cae\u6db2", "category": "A\u80a1\u6d88\u8d39\u767d\u9152", "sector": "Liquor", "market": "SZ" },
+  { "symbol": "300750", "company_name": "\u5b81\u5fb7\u65f6\u4ee3", "category": "A\u80a1\u65b0\u80fd\u6e90", "sector": "Battery", "market": "SZ" },
+  { "symbol": "002594", "company_name": "\u6bd4\u4e9a\u8fea", "category": "A\u80a1\u65b0\u80fd\u6e90", "sector": "EV", "market": "SZ" },
+  { "symbol": "00700", "company_name": "\u817e\u8baf\u63a7\u80a1", "category": "\u6e2f\u80a1\u4e92\u8054\u7f51", "sector": "Internet", "market": "HK" },
+  { "symbol": "09988", "company_name": "\u963f\u91cc\u5df4\u5df4-SW", "category": "\u6e2f\u80a1\u4e92\u8054\u7f51", "sector": "E-Commerce", "market": "HK" }
+]

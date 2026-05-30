@@ -1,0 +1,27 @@
+{
+  "pptxPath": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\股票实时流分析平台实时数据分析模块汇报.pptx",
+  "previewDir": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview",
+  "slideCount": 19,
+  "previews": [
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\01_cover.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\02_position.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\03_flow.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\04_files.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\05_producer.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\06_kafka.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\07_spark_read.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\08_json.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\09_quality.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\10_micro_batch.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\11_write_batch.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\12_aggregates.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\13_alerts.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\14_storage.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\15_backend_frontend.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\16_health.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\17_stability.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\18_summary.png",
+    "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\19_improvements.png"
+  ],
+  "montage": "E:\\作业\\ww\\Comprehensive_practice\\docs\\ppt\\realtime_module_report_preview\\montage.png"
+}
