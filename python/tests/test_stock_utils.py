@@ -5,7 +5,7 @@ from python.common.stock_utils import calc_change_pct, detect_market, eastmoney_
 
 class StockUtilsTests(unittest.TestCase):
     def test_infer_sector(self):
-        self.assertEqual(infer_sector("AAPL"), "Consumer Electronics")
+        self.assertEqual(infer_sector("600519"), "Other")
         self.assertEqual(infer_sector("UNKNOWN"), "Other")
 
     def test_calc_change_pct(self):
@@ -15,9 +15,10 @@ class StockUtilsTests(unittest.TestCase):
     def test_market_code_helpers(self):
         self.assertEqual(detect_market("600519"), "SH")
         self.assertEqual(detect_market("000001"), "SZ")
-        self.assertEqual(eastmoney_secid("AAPL", "NASDAQ"), "105.AAPL")
+        self.assertEqual(detect_market("00700"), "HK")
+        self.assertEqual(eastmoney_secid("00700", "HK"), "116.00700")
         self.assertEqual(sina_code("600519"), "sh600519")
-        self.assertEqual(tencent_code("AAPL", "NASDAQ"), "usAAPL")
+        self.assertEqual(tencent_code("00700", "HK"), "hk00700")
 
 
 if __name__ == "__main__":

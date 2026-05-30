@@ -1,0 +1,52 @@
+name: Project CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend-python:
+    name: Frontend and Python checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check frontend JavaScript syntax
+        run: node --check frontend/vendor-loader.js frontend/shared-ui.js frontend/dashboard-home.js frontend/dash-pages.js
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check Python syntax
+        run: python -m compileall -q python scripts
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s python/tests -p "test_*.py"
+
+  backend:
+    name: Java backend compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Compile backend
+        working-directory: java-backend
+        run: mvn -q -DskipTests compile
