@@ -34,6 +34,35 @@ foreach ($port in $Ports) {
     }
 }
 
+$demoCommandPatterns = @(
+    "python\\spark\\stock_streaming_job\.py",
+    "python\.spark\.stock_streaming_job",
+    "python\.producer\.stock_producer",
+    "python\.producer\.stock_replay_producer",
+    "stock-risk-backend-0\.0\.1-SNAPSHOT\.jar",
+    "http\.server.*--directory.*frontend"
+)
+$runtimePattern = [regex]::Escape($RuntimeDir)
+Get-CimInstance Win32_Process | ForEach-Object {
+    $commandLine = $_.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) {
+        return
+    }
+    $isDemoProcess = $false
+    foreach ($pattern in $demoCommandPatterns) {
+        if ($commandLine -match $pattern) {
+            $isDemoProcess = $true
+            break
+        }
+    }
+    if (-not $isDemoProcess -and $commandLine -match $runtimePattern) {
+        $isDemoProcess = $true
+    }
+    if ($isDemoProcess -and $_.ProcessId -gt 0) {
+        [void]$processIds.Add([int]$_.ProcessId)
+    }
+}
+
 foreach ($processId in $processIds) {
     if ($processId -le 0) {
         continue

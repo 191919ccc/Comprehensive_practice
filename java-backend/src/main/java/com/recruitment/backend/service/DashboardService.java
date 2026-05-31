@@ -103,30 +103,68 @@ public class DashboardService {
         response.put("system_health", fetchHealth());
         response.put("stream_status", fetchSingleRow("""
                 SELECT
-                    COUNT(*) AS total_events,
-                    COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_minute,
-                    COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 5 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_5_minutes,
-                    COUNT(DISTINCT symbol) AS total_symbols,
-                    COUNT(DISTINCT source) AS source_count,
-                    DATE_FORMAT(MAX(event_time), '%Y-%m-%d %H:%i:%s') AS latest_event_time,
-                    TIMESTAMPDIFF(SECOND, MAX(created_at), NOW()) AS seconds_since_last_event,
+                    p.total_events,
+                    COALESCE(p.events_last_minute, 0) + COALESCE(m.heartbeats_last_minute, 0) AS events_last_minute,
+                    COALESCE(p.events_last_5_minutes, 0) + COALESCE(m.heartbeats_last_5_minutes, 0) AS events_last_5_minutes,
+                    p.total_symbols,
+                    p.source_count,
+                    DATE_FORMAT(p.latest_event_time, '%Y-%m-%d %H:%i:%s') AS latest_event_time,
+                    DATE_FORMAT(p.latest_created_at, '%Y-%m-%d %H:%i:%s') AS latest_price_created_at,
+                    DATE_FORMAT(m.latest_metric_created_at, '%Y-%m-%d %H:%i:%s') AS latest_metric_created_at,
+                    TIMESTAMPDIFF(
+                        SECOND,
+                        GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ),
+                        NOW()
+                    ) AS seconds_since_last_event,
                     CASE
-                        WHEN MAX(created_at) < NOW() - INTERVAL 10 MINUTE THEN 'OFFLINE'
-                        WHEN (
+                        WHEN GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ) < NOW() - INTERVAL 10 MINUTE THEN 'OFFLINE'
+                        WHEN p.latest_source LIKE 'replay_%'
+                             AND COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')) >= COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                            THEN 'REPLAY'
+                        WHEN p.latest_created_at IS NOT NULL OR m.latest_metric_created_at IS NOT NULL THEN 'LIVE'
+                        ELSE 'OFFLINE'
+                    END AS current_mode,
+                    CASE
+                        WHEN GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ) >= NOW() - INTERVAL 30 SECOND THEN 'FLOWING'
+                        WHEN GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ) >= NOW() - INTERVAL 5 MINUTE THEN 'DELAYED'
+                        ELSE 'STOPPED'
+                    END AS stream_state
+                FROM (
+                    SELECT
+                        COUNT(*) AS total_events,
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_minute,
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 5 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_5_minutes,
+                        COUNT(DISTINCT symbol) AS total_symbols,
+                        COUNT(DISTINCT source) AS source_count,
+                        MAX(event_time) AS latest_event_time,
+                        MAX(created_at) AS latest_created_at,
+                        (
                             SELECT latest_source.source
                             FROM price_ticks latest_source
                             ORDER BY latest_source.created_at DESC, latest_source.id DESC
                             LIMIT 1
-                        ) LIKE 'replay_%' THEN 'REPLAY'
-                        WHEN MAX(created_at) IS NOT NULL THEN 'LIVE'
-                        ELSE 'OFFLINE'
-                    END AS current_mode,
-                    CASE
-                        WHEN MAX(created_at) >= NOW() - INTERVAL 30 SECOND THEN 'FLOWING'
-                        WHEN MAX(created_at) >= NOW() - INTERVAL 5 MINUTE THEN 'DELAYED'
-                        ELSE 'STOPPED'
-                    END AS stream_state
-                FROM price_ticks
+                        ) AS latest_source
+                    FROM price_ticks
+                ) p
+                CROSS JOIN (
+                    SELECT
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS heartbeats_last_minute,
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 5 MINUTE THEN 1 ELSE 0 END), 0) AS heartbeats_last_5_minutes,
+                        MAX(created_at) AS latest_metric_created_at
+                    FROM metric_snapshots
+                ) m
                 """));
         response.put("summary", fetchSingleRow("""
                 -- 只取每只股票最新一条行情，避免历史数据重复影响总览指标。
@@ -425,16 +463,49 @@ public class DashboardService {
         health.put("database", fetchDatabaseHealth());
         health.put("stream", fetchSingleRow("""
                 SELECT
-                    COUNT(*) AS total_events,
-                    COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_minute,
-                    DATE_FORMAT(MAX(created_at), '%Y-%m-%d %H:%i:%s') AS latest_created_at,
-                    TIMESTAMPDIFF(SECOND, MAX(created_at), NOW()) AS seconds_since_last_event,
+                    p.total_events,
+                    COALESCE(p.events_last_minute, 0) + COALESCE(m.heartbeats_last_minute, 0) AS events_last_minute,
+                    DATE_FORMAT(
+                        GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ),
+                        '%Y-%m-%d %H:%i:%s'
+                    ) AS latest_created_at,
+                    DATE_FORMAT(p.latest_created_at, '%Y-%m-%d %H:%i:%s') AS latest_price_created_at,
+                    DATE_FORMAT(m.latest_metric_created_at, '%Y-%m-%d %H:%i:%s') AS latest_metric_created_at,
+                    TIMESTAMPDIFF(
+                        SECOND,
+                        GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ),
+                        NOW()
+                    ) AS seconds_since_last_event,
                     CASE
-                        WHEN MAX(created_at) >= NOW() - INTERVAL 30 SECOND THEN 'OK'
-                        WHEN MAX(created_at) >= NOW() - INTERVAL 5 MINUTE THEN 'DELAYED'
+                        WHEN GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ) >= NOW() - INTERVAL 30 SECOND THEN 'OK'
+                        WHEN GREATEST(
+                            COALESCE(p.latest_created_at, TIMESTAMP('1970-01-01 00:00:00')),
+                            COALESCE(m.latest_metric_created_at, TIMESTAMP('1970-01-01 00:00:00'))
+                        ) >= NOW() - INTERVAL 5 MINUTE THEN 'DELAYED'
                         ELSE 'STOPPED'
                     END AS status
-                FROM price_ticks
+                FROM (
+                    SELECT
+                        COUNT(*) AS total_events,
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS events_last_minute,
+                        MAX(created_at) AS latest_created_at
+                    FROM price_ticks
+                ) p
+                CROSS JOIN (
+                    SELECT
+                        COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL 1 MINUTE THEN 1 ELSE 0 END), 0) AS heartbeats_last_minute,
+                        MAX(created_at) AS latest_metric_created_at
+                    FROM metric_snapshots
+                ) m
                 """));
         health.put("storage", Map.of(
                 "output", inspectStoragePath(hdfsOutputPath),

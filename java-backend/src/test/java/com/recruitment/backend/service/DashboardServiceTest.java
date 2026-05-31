@@ -67,7 +67,7 @@ class DashboardServiceTest {
         row.put("turnover", "12345.67");
         row.put("event_time", "2026-05-29 09:30:00");
         row.put("source", "sina");
-        doReturn(List.of(row)).when(jdbcTemplate).queryForList(anyString(), any(), any(), any());
+        doReturn(List.of(row)).when(jdbcTemplate).queryForList(anyString(), any(Object[].class));
 
         String csv = dashboardService.exportHistoryCsv("000001", 1440, 200);
 

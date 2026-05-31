@@ -83,19 +83,52 @@ New-Item -ItemType Directory -Force -Path $kafkaRuntimeLogs | Out-Null
     } |
     Set-Content -Path $zookeeperRuntimeConfig -Encoding UTF8
 
-(Get-Content "$KafkaHome\config\server.properties") |
-    ForEach-Object {
-        if ($_ -match "^log\.dirs=") {
-            "log.dirs=$kafkaRuntimeLogs"
-        } elseif ($_ -match "^zookeeper\.connect=") {
-            "zookeeper.connect=127.0.0.1:$ZooKeeperPort"
-        } elseif ($_ -match "^zookeeper\.connection\.timeout\.ms=") {
-            "zookeeper.connection.timeout.ms=30000"
-        } else {
-            $_
+$kafkaConfigLines = New-Object System.Collections.Generic.List[string]
+$wroteKafkaListeners = $false
+$wroteKafkaAdvertisedListeners = $false
+$wroteKafkaLogDirs = $false
+$wroteKafkaZookeeper = $false
+$wroteKafkaZookeeperTimeout = $false
+Get-Content "$KafkaHome\config\server.properties" | ForEach-Object {
+    if ($_ -match "^\s*#?\s*listeners=") {
+        if (-not $wroteKafkaListeners) {
+            $kafkaConfigLines.Add("listeners=PLAINTEXT://127.0.0.1:$KafkaPort")
+            $wroteKafkaListeners = $true
         }
-    } |
-    Set-Content -Path $kafkaRuntimeConfig -Encoding UTF8
+    } elseif ($_ -match "^\s*#?\s*advertised\.listeners=") {
+        if (-not $wroteKafkaAdvertisedListeners) {
+            $kafkaConfigLines.Add("advertised.listeners=PLAINTEXT://127.0.0.1:$KafkaPort")
+            $wroteKafkaAdvertisedListeners = $true
+        }
+    } elseif ($_ -match "^log\.dirs=") {
+        $kafkaConfigLines.Add("log.dirs=$kafkaRuntimeLogs")
+        $wroteKafkaLogDirs = $true
+    } elseif ($_ -match "^zookeeper\.connect=") {
+        $kafkaConfigLines.Add("zookeeper.connect=127.0.0.1:$ZooKeeperPort")
+        $wroteKafkaZookeeper = $true
+    } elseif ($_ -match "^zookeeper\.connection\.timeout\.ms=") {
+        $kafkaConfigLines.Add("zookeeper.connection.timeout.ms=30000")
+        $wroteKafkaZookeeperTimeout = $true
+    } else {
+        $kafkaConfigLines.Add($_)
+    }
+}
+if (-not $wroteKafkaListeners) {
+    $kafkaConfigLines.Add("listeners=PLAINTEXT://127.0.0.1:$KafkaPort")
+}
+if (-not $wroteKafkaAdvertisedListeners) {
+    $kafkaConfigLines.Add("advertised.listeners=PLAINTEXT://127.0.0.1:$KafkaPort")
+}
+if (-not $wroteKafkaLogDirs) {
+    $kafkaConfigLines.Add("log.dirs=$kafkaRuntimeLogs")
+}
+if (-not $wroteKafkaZookeeper) {
+    $kafkaConfigLines.Add("zookeeper.connect=127.0.0.1:$ZooKeeperPort")
+}
+if (-not $wroteKafkaZookeeperTimeout) {
+    $kafkaConfigLines.Add("zookeeper.connection.timeout.ms=30000")
+}
+$kafkaConfigLines | Set-Content -Path $kafkaRuntimeConfig -Encoding UTF8
 
 function Test-PortListening([int]$Port) {
     $line = netstat -ano | Select-String ":$Port\s+.*LISTENING"
