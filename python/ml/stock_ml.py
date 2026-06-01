@@ -149,7 +149,9 @@ PREDICTION_HORIZON = max(1, int(settings.ml_prediction_horizon))
 PREDICTION_HORIZON_EXPERIMENTS = [1, 3, 5]
 ML_TARGET_MODE = settings.ml_target_mode if settings.ml_target_mode in {"direction", "downside_risk"} else "downside_risk"
 RISK_TARGET_ENABLED = ML_TARGET_MODE == "downside_risk"
+RISK_DOWNSIDE_THRESHOLD = max(0.0, float(settings.ml_risk_downside_threshold))
 RISK_VOLATILITY_THRESHOLD = max(0.0, float(settings.ml_risk_volatility_threshold))
+RISK_ALERT_MIN_RETURN = max(0.0, float(settings.ml_risk_alert_min_return))
 DIRECTION_VOLATILITY_WINDOW = 20
 DIRECTION_THRESHOLD_MULTIPLIER = 1.0
 THRESHOLD_EXPERIMENTS = [0.003, 0.005, 0.01, 0.015, 0.02]
@@ -907,12 +909,13 @@ def prepare_dataset(
     else:
         sorted_df["direction_threshold"] = adaptive_threshold.fillna(MIN_DIRECTION_RETURN).clip(lower=MIN_DIRECTION_RETURN)
     if RISK_TARGET_ENABLED:
+        risk_threshold = np.maximum(sorted_df["direction_threshold"], RISK_DOWNSIDE_THRESHOLD)
         downside_risk = (
-            (sorted_df["next_return"] <= -sorted_df["direction_threshold"])
-            | (sorted_df["future_min_return"] <= -sorted_df["direction_threshold"])
+            (sorted_df["next_return"] <= -risk_threshold)
+            | (sorted_df["future_min_return"] <= -risk_threshold)
             | (
                 (sorted_df["future_range_return"] >= RISK_VOLATILITY_THRESHOLD)
-                & (sorted_df["future_min_return"] <= -(sorted_df["direction_threshold"] * 0.5))
+                & (sorted_df["future_min_return"] <= -(risk_threshold * 0.7))
             )
         )
         sorted_df["next_direction"] = np.where(downside_risk, DIRECTION_DOWN, DIRECTION_FLAT)
@@ -1304,7 +1307,9 @@ def train_tabular_models(
     decision_metrics[f"{name}_direction_threshold"] = direction_threshold
     decision_metrics[f"{name}_prediction_horizon"] = float(prediction_horizon)
     decision_metrics[f"{name}_risk_target_enabled"] = 1.0 if RISK_TARGET_ENABLED else 0.0
+    decision_metrics[f"{name}_risk_downside_threshold"] = RISK_DOWNSIDE_THRESHOLD
     decision_metrics[f"{name}_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
+    decision_metrics[f"{name}_risk_alert_min_return"] = RISK_ALERT_MIN_RETURN
     alert_metrics = alert_backtest_metrics(
         name,
         y_return_test,
@@ -1335,7 +1340,9 @@ def train_tabular_models(
             "direction_threshold": direction_threshold,
             "prediction_horizon": prediction_horizon,
             "target_mode": ML_TARGET_MODE,
+            "risk_downside_threshold": RISK_DOWNSIDE_THRESHOLD,
             "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
+            "risk_alert_min_return": RISK_ALERT_MIN_RETURN,
         },
     )
 
@@ -1824,7 +1831,9 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
     decision_metrics["lstm_direction_threshold"] = direction_threshold
     decision_metrics["lstm_prediction_horizon"] = float(prediction_horizon)
     decision_metrics["lstm_risk_target_enabled"] = 1.0 if RISK_TARGET_ENABLED else 0.0
+    decision_metrics["lstm_risk_downside_threshold"] = RISK_DOWNSIDE_THRESHOLD
     decision_metrics["lstm_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
+    decision_metrics["lstm_risk_alert_min_return"] = RISK_ALERT_MIN_RETURN
     alert_metrics = alert_backtest_metrics(
         "lstm",
         y_return_test,
@@ -1862,7 +1871,9 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             "direction_threshold": direction_threshold,
             "prediction_horizon": prediction_horizon,
             "target_mode": ML_TARGET_MODE,
+            "risk_downside_threshold": RISK_DOWNSIDE_THRESHOLD,
             "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
+            "risk_alert_min_return": RISK_ALERT_MIN_RETURN,
         },
     )
 
@@ -2255,7 +2266,7 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
     weak_down_return = pd.Series(False, index=result.index)
     if "predicted_return" in result.columns:
         predicted_return = pd.to_numeric(result["predicted_return"], errors="coerce").fillna(0.0)
-        down_return_floor = 0.0 if RISK_TARGET_ENABLED else -movement_threshold
+        down_return_floor = -RISK_ALERT_MIN_RETURN if RISK_TARGET_ENABLED else -movement_threshold
         weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > down_return_floor)
     weak_alert = low_confidence_up | low_confidence_down | weak_down_return
     if not weak_alert.any():
@@ -2380,8 +2391,12 @@ def ensemble_weight_score(result: ModelResult) -> float:
         )
         if down_coverage < 0.03:
             score *= 0.50
-        if down_coverage > 0.45:
-            score *= 0.70
+        if down_coverage > 0.60:
+            score *= 0.35
+        elif down_coverage > 0.50:
+            score *= 0.55
+        elif down_coverage > 0.42:
+            score *= 0.75
         return max(float(score), 0.005)
     if lift <= -0.03 or primary_lift <= -0.03:
         return 0.005
@@ -2488,7 +2503,9 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
     metrics.append(("prediction", "return_signal_override_threshold", float(PREDICTION_RETURN_SIGNAL_THRESHOLD)))
     metrics.append(("prediction", "prediction_horizon", float(PREDICTION_HORIZON)))
     metrics.append(("prediction", "target_downside_risk_enabled", 1.0 if RISK_TARGET_ENABLED else 0.0))
+    metrics.append(("prediction", "risk_downside_threshold", float(RISK_DOWNSIDE_THRESHOLD)))
     metrics.append(("prediction", "risk_volatility_threshold", float(RISK_VOLATILITY_THRESHOLD)))
+    metrics.append(("prediction", "risk_alert_min_return", float(RISK_ALERT_MIN_RETURN)))
     metrics.append(("selection", "best_model_code", float({"random_forest": 1, "lightgbm": 2, "lstm": 3}.get(best_model_name, 0))))
     return metrics
 

@@ -89,7 +89,9 @@ class Settings:
     ml_direction_threshold = float(os.getenv("ML_DIRECTION_THRESHOLD", "0.020"))
     ml_prediction_horizon = int(os.getenv("ML_PREDICTION_HORIZON", "5"))
     ml_target_mode = os.getenv("ML_TARGET_MODE", "downside_risk").strip().lower()
-    ml_risk_volatility_threshold = float(os.getenv("ML_RISK_VOLATILITY_THRESHOLD", "0.040"))
+    ml_risk_downside_threshold = float(os.getenv("ML_RISK_DOWNSIDE_THRESHOLD", "0.030"))
+    ml_risk_volatility_threshold = float(os.getenv("ML_RISK_VOLATILITY_THRESHOLD", "0.060"))
+    ml_risk_alert_min_return = float(os.getenv("ML_RISK_ALERT_MIN_RETURN", "0.010"))
     ml_horizon_experiments = os.getenv("ML_HORIZON_EXPERIMENTS", "1,3,5")
     ml_prediction_return_signal_threshold = float(os.getenv("ML_PREDICTION_RETURN_SIGNAL_THRESHOLD", "0.003"))
     # 日线训练数据时效阈值。训练入口会在数据过旧时中止，避免前端展示“新预测、旧数据”的状态。
