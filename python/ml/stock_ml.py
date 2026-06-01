@@ -2061,8 +2061,11 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
     result = frame.copy()
     if "predicted_signal" not in result.columns or "confidence" not in result.columns:
         return result
-    # predicted_signal 淇濈暀鐪熷疄妯″瀷鏂瑰悜锛屽啓鍏?ml_prediction_history 渚涙紓绉绘娴嬶紱
-    # alert_signal 鎵嶆槸缁忚繃缃俊搴﹀拰鏀剁泭骞呭害杩囨护鍚庣殑淇濆畧鍛婅淇″彿銆?    result["alert_signal"] = result["predicted_signal"]
+    result["predicted_signal"] = result["predicted_signal"].where(
+        result["predicted_signal"].isin({"UP", "DOWN", "WATCH"}),
+        "WATCH",
+    )
+    result["alert_signal"] = result["predicted_signal"].fillna("WATCH")
     if "predicted_direction" in result.columns:
         result["alert_direction"] = result["predicted_direction"]
     up_threshold = float(settings.ml_alert_up_confidence_threshold)
@@ -2077,10 +2080,12 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
         weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > -movement_threshold)
     weak_alert = low_confidence_up | low_confidence_down | weak_down_return
     if not weak_alert.any():
+        result["alert_signal"] = result["alert_signal"].where(result["alert_signal"].isin({"UP", "DOWN", "WATCH"}), "WATCH")
         return result
     result.loc[weak_alert, "alert_signal"] = DIRECTION_SIGNAL_MAP[DIRECTION_FLAT]
     if "predicted_direction" in result.columns:
         result.loc[weak_alert, "alert_direction"] = DIRECTION_FLAT
+    result["alert_signal"] = result["alert_signal"].where(result["alert_signal"].isin({"UP", "DOWN", "WATCH"}), "WATCH")
     return result
 
 
@@ -2215,7 +2220,7 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
         fallback_results = [result for result in results if result.name != "random_forest"] or results
         return predict_latest(df, select_best_model(fallback_results), version, index_df)
 
-    # 鍚勬ā鍨嬪厛鐙珛棰勬祴锛屽啀鎸?walk-forward/balanced/F1 绛夌ǔ鍋ユ寚鏍囧姩鎬佸姞鏉冿紝鑰屼笉鏄畝鍗曞钩鍧囥€?    weighted_predictions: list[tuple[str, float, pd.DataFrame]] = []
+    weighted_predictions: list[tuple[str, float, pd.DataFrame]] = []
     for result in candidates:
         prediction = predict_latest_lstm(df, result, version, index_df) if result.model_type == "sequence" else predict_latest_tabular(df, result, version, index_df)
         weighted_predictions.append((result.name, ensemble_weight_score(result), prediction))
@@ -2302,23 +2307,23 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ml_prediction_history (
-                    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '棰勬祴鍘嗗彶涓婚敭ID',
-                    symbol VARCHAR(32) NOT NULL COMMENT '鑲＄エ浠ｇ爜',
-                    company_name VARCHAR(255) NOT NULL COMMENT '鍏徃鍚嶇О',
-                    category VARCHAR(64) NOT NULL COMMENT '鑲＄エ姹犲垎绫?,
-                    sector VARCHAR(64) NOT NULL COMMENT '琛屼笟鍒嗙被',
-                    current_price DECIMAL(18, 2) NOT NULL COMMENT '棰勬祴鍙戠敓鏃剁殑褰撳墠浠锋牸',
-                    predicted_next_price DECIMAL(18, 2) NOT NULL COMMENT '棰勬祴涓嬩竴鏃跺埢浠锋牸',
-                    predicted_signal VARCHAR(16) NOT NULL COMMENT '妯″瀷鍘熷棰勬祴鏂瑰悜淇″彿锛屼緥濡?UP銆丏OWN銆乄ATCH',
-                    alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '缁忚繃缃俊搴﹁繃婊ゅ悗鐨勫憡璀︿晶淇″彿',
-                    confidence DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '棰勬祴缃俊搴︼紝鑼冨洿0鍒?',
-                    model_version VARCHAR(64) NOT NULL COMMENT '妯″瀷鐗堟湰鍙?,
-                    predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '棰勬祴鐢熸垚鏃堕棿',
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    symbol VARCHAR(32) NOT NULL,
+                    company_name VARCHAR(255) NOT NULL,
+                    category VARCHAR(64) NOT NULL,
+                    sector VARCHAR(64) NOT NULL,
+                    current_price DECIMAL(18, 2) NOT NULL,
+                    predicted_next_price DECIMAL(18, 2) NOT NULL,
+                    predicted_signal VARCHAR(16) NOT NULL,
+                    alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH',
+                    confidence DECIMAL(8, 4) NOT NULL DEFAULT 0,
+                    model_version VARCHAR(64) NOT NULL,
+                    predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     KEY idx_ml_prediction_history_symbol_time (symbol, predicted_at),
                     KEY idx_ml_prediction_history_model_time (model_version, predicted_at),
                     KEY idx_ml_prediction_history_signal_time (predicted_signal, predicted_at),
                     KEY idx_ml_prediction_history_alert_signal_time (alert_signal, predicted_at)
-                ) COMMENT='鏈哄櫒瀛︿範棰勬祴鍘嗗彶琛紝鐢ㄤ簬妯″瀷婕傜Щ妫€娴?
+                )
                 """
             )
             for table_name in ("ml_predictions", "ml_prediction_history"):
@@ -2338,6 +2343,10 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
             for row in predictions.itertuples(index=False):
                 raw_signal = str(row.predicted_signal)
                 alert_signal = str(getattr(row, "alert_signal", raw_signal))
+                if raw_signal not in DIRECTION_SIGNAL_MAP.values():
+                    raw_signal = DIRECTION_SIGNAL_MAP[DIRECTION_FLAT]
+                if alert_signal not in DIRECTION_SIGNAL_MAP.values():
+                    alert_signal = DIRECTION_SIGNAL_MAP[DIRECTION_FLAT]
                 current_values = (
                     row.symbol,
                     row.company_name,

@@ -226,7 +226,13 @@ def main() -> None:
         with log_stage("write results"):
             write_results(predictions, metrics, version)
         with log_stage("check model drift"):
-            drift_result = check_model_drift(window=50, threshold=0.55, horizon=selected_horizon)
+            drift_result = check_model_drift(
+                window=50,
+                threshold=0.55,
+                horizon=selected_horizon,
+                model_version=f"ensemble-{version}",
+                price_source="daily",
+            )
 
     sample_rows = {name: len(model_dataset) for name, model_dataset in model_datasets.items()}
     print(f"trained {len(model_results)} daily stock ML models with samples={sample_rows}, version={version}")
