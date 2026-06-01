@@ -147,6 +147,9 @@ PREDICTION_RETURN_SIGNAL_THRESHOLD = max(0.0, float(settings.ml_prediction_retur
 DIRECTION_FIXED_THRESHOLD: float | None = None
 PREDICTION_HORIZON = max(1, int(settings.ml_prediction_horizon))
 PREDICTION_HORIZON_EXPERIMENTS = [1, 3, 5]
+ML_TARGET_MODE = settings.ml_target_mode if settings.ml_target_mode in {"direction", "downside_risk"} else "downside_risk"
+RISK_TARGET_ENABLED = ML_TARGET_MODE == "downside_risk"
+RISK_VOLATILITY_THRESHOLD = max(0.0, float(settings.ml_risk_volatility_threshold))
 DIRECTION_VOLATILITY_WINDOW = 20
 DIRECTION_THRESHOLD_MULTIPLIER = 1.0
 THRESHOLD_EXPERIMENTS = [0.003, 0.005, 0.01, 0.015, 0.02]
@@ -259,6 +262,9 @@ def direction_eval_metrics(prefix: str, y_true: np.ndarray | pd.Series, y_pred: 
         metrics[f"{prefix}_{name}_recall"] = true_positive / actual_total if actual_total else 0.0
         metrics[f"{prefix}_{name}_precision"] = true_positive / predicted_total if predicted_total else 0.0
         metrics[f"{prefix}_predicted_{name}_ratio"] = float(pred_counts[label] / total)
+    metrics[f"{prefix}_risk_recall"] = metrics[f"{prefix}_down_recall"]
+    metrics[f"{prefix}_risk_precision"] = metrics[f"{prefix}_down_precision"]
+    metrics[f"{prefix}_predicted_risk_ratio"] = metrics[f"{prefix}_predicted_down_ratio"]
     return metrics
 
 
@@ -311,11 +317,16 @@ def validation_baseline_guard(
     raw_metrics = direction_eval_metrics(f"{prefix}_raw", true_values, pred_values)
     comparison_metrics = direction_eval_metrics(prefix, true_values, pred_values)
     raw_lift = float(comparison_metrics.get(f"{prefix}_direction_lift_over_baseline", -1.0))
-    if raw_lift >= BASELINE_GUARD_LIFT_FLOOR:
+    raw_down_recall = float(comparison_metrics.get(f"{prefix}_down_recall", 0.0))
+    raw_down_precision = float(comparison_metrics.get(f"{prefix}_down_precision", 0.0))
+    preserves_risk_signal = RISK_TARGET_ENABLED and raw_down_recall > 0 and raw_down_precision >= 0.10
+    if raw_lift >= BASELINE_GUARD_LIFT_FLOOR or preserves_risk_signal:
         final_predictions = pred_values
         guard_used = 0.0
         guard_label = -1
         params.setdefault("validation_guard_used", 0.0)
+        if preserves_risk_signal and raw_lift < BASELINE_GUARD_LIFT_FLOOR:
+            params.setdefault("validation_guard_reason", "kept_downside_risk_recall")
     else:
         counts = np.bincount(true_values, minlength=len(DIRECTION_LABELS))
         guard_label = int(counts.argmax())
@@ -445,6 +456,8 @@ def direction_class_weights(labels: np.ndarray | pd.Series) -> np.ndarray:
     present = counts > 0
     if present.any():
         weights[present] = weights[present] / weights[present].mean()
+    if RISK_TARGET_ENABLED and counts[DIRECTION_DOWN] > 0:
+        weights[DIRECTION_DOWN] *= 1.35
     return weights
 
 
@@ -868,6 +881,22 @@ def prepare_dataset(
         (sorted_df["next_price"] - sorted_df["last_price"]) / sorted_df["last_price"],
         0,
     )
+    future_price_frame = pd.concat(
+        [sorted_df.groupby("symbol")["last_price"].shift(-step) for step in range(1, horizon + 1)],
+        axis=1,
+    )
+    sorted_df["future_min_price"] = future_price_frame.min(axis=1)
+    sorted_df["future_max_price"] = future_price_frame.max(axis=1)
+    sorted_df["future_min_return"] = np.where(
+        sorted_df["last_price"].abs() > 1e-8,
+        (sorted_df["future_min_price"] - sorted_df["last_price"]) / sorted_df["last_price"],
+        0,
+    )
+    sorted_df["future_range_return"] = np.where(
+        sorted_df["last_price"].abs() > 1e-8,
+        (sorted_df["future_max_price"] - sorted_df["future_min_price"]) / sorted_df["last_price"],
+        0,
+    )
     adaptive_threshold = sorted_df.groupby("symbol")["return_1"].transform(
         lambda item: item.rolling(DIRECTION_VOLATILITY_WINDOW, min_periods=5).std()
     )
@@ -877,18 +906,32 @@ def prepare_dataset(
         sorted_df["direction_threshold"] = float(fixed_threshold)
     else:
         sorted_df["direction_threshold"] = adaptive_threshold.fillna(MIN_DIRECTION_RETURN).clip(lower=MIN_DIRECTION_RETURN)
-    sorted_df["next_direction"] = np.select(
-        [
-            sorted_df["next_return"] > sorted_df["direction_threshold"],
-            sorted_df["next_return"] < -sorted_df["direction_threshold"],
-        ],
-        [DIRECTION_UP, DIRECTION_DOWN],
-        default=DIRECTION_FLAT,
-    )
+    if RISK_TARGET_ENABLED:
+        downside_risk = (
+            (sorted_df["next_return"] <= -sorted_df["direction_threshold"])
+            | (sorted_df["future_min_return"] <= -sorted_df["direction_threshold"])
+            | (
+                (sorted_df["future_range_return"] >= RISK_VOLATILITY_THRESHOLD)
+                & (sorted_df["future_min_return"] <= -(sorted_df["direction_threshold"] * 0.5))
+            )
+        )
+        sorted_df["next_direction"] = np.where(downside_risk, DIRECTION_DOWN, DIRECTION_FLAT)
+        sorted_df["target_mode"] = ML_TARGET_MODE
+    else:
+        sorted_df["next_direction"] = np.select(
+            [
+                sorted_df["next_return"] > sorted_df["direction_threshold"],
+                sorted_df["next_return"] < -sorted_df["direction_threshold"],
+            ],
+            [DIRECTION_UP, DIRECTION_DOWN],
+            default=DIRECTION_FLAT,
+        )
+        sorted_df["target_mode"] = ML_TARGET_MODE
     sorted_df = sorted_df.dropna(subset=["next_price"])
     sorted_df["next_direction"] = sorted_df["next_direction"].astype(int)
     sorted_df.attrs["direction_threshold"] = float(sorted_df["direction_threshold"].iloc[0]) if not sorted_df.empty else None
     sorted_df.attrs["prediction_horizon"] = horizon
+    sorted_df.attrs["target_mode"] = ML_TARGET_MODE
     return sorted_df
 
 
@@ -913,8 +956,9 @@ def prepare_model_datasets(
             limited = limit_training_dataset(prepared)
             limited.attrs["direction_threshold"] = threshold
             limited.attrs["prediction_horizon"] = horizon
+            limited.attrs["target_mode"] = prepared.attrs.get("target_mode", ML_TARGET_MODE)
             print(
-                f"[ml] prepared horizon={horizon} threshold={threshold:g} rows {before_limit} -> {len(limited)}, symbols={limited['symbol'].nunique() if not limited.empty else 0}",
+                f"[ml] prepared target={ML_TARGET_MODE} horizon={horizon} threshold={threshold:g} rows {before_limit} -> {len(limited)}, symbols={limited['symbol'].nunique() if not limited.empty else 0}",
                 flush=True,
             )
             dataset_by_key[key] = limited
@@ -1247,11 +1291,20 @@ def train_tabular_models(
         decision_metrics[f"{name}_decision_min_direction_prob"] = float(decision_params["min_direction_prob"])
         decision_metrics[f"{name}_decision_min_direction_margin"] = float(decision_params["min_direction_margin"])
     if decision_params:
-        for key in ("calibration_accuracy", "calibration_majority_baseline", "calibration_lift_over_baseline"):
+        for key in (
+            "calibration_accuracy",
+            "calibration_majority_baseline",
+            "calibration_lift_over_baseline",
+            "calibration_down_recall",
+            "calibration_down_precision",
+            "calibration_predicted_down_ratio",
+        ):
             if key in decision_params:
                 decision_metrics[f"{name}_{key}"] = float(decision_params[key])
     decision_metrics[f"{name}_direction_threshold"] = direction_threshold
     decision_metrics[f"{name}_prediction_horizon"] = float(prediction_horizon)
+    decision_metrics[f"{name}_risk_target_enabled"] = 1.0 if RISK_TARGET_ENABLED else 0.0
+    decision_metrics[f"{name}_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
     alert_metrics = alert_backtest_metrics(
         name,
         y_return_test,
@@ -1281,6 +1334,8 @@ def train_tabular_models(
             "decision_params": decision_params or {"mode": "argmax"},
             "direction_threshold": direction_threshold,
             "prediction_horizon": prediction_horizon,
+            "target_mode": ML_TARGET_MODE,
+            "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
         },
     )
 
@@ -1756,11 +1811,20 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
         decision_metrics["lstm_decision_min_direction_prob"] = float(decision_params["min_direction_prob"])
         decision_metrics["lstm_decision_min_direction_margin"] = float(decision_params["min_direction_margin"])
     if decision_params:
-        for key in ("calibration_accuracy", "calibration_majority_baseline", "calibration_lift_over_baseline"):
+        for key in (
+            "calibration_accuracy",
+            "calibration_majority_baseline",
+            "calibration_lift_over_baseline",
+            "calibration_down_recall",
+            "calibration_down_precision",
+            "calibration_predicted_down_ratio",
+        ):
             if key in decision_params:
                 decision_metrics[f"lstm_{key}"] = float(decision_params[key])
     decision_metrics["lstm_direction_threshold"] = direction_threshold
     decision_metrics["lstm_prediction_horizon"] = float(prediction_horizon)
+    decision_metrics["lstm_risk_target_enabled"] = 1.0 if RISK_TARGET_ENABLED else 0.0
+    decision_metrics["lstm_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
     alert_metrics = alert_backtest_metrics(
         "lstm",
         y_return_test,
@@ -1797,6 +1861,8 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             "decision_params": decision_params or {"mode": "argmax"},
             "direction_threshold": direction_threshold,
             "prediction_horizon": prediction_horizon,
+            "target_mode": ML_TARGET_MODE,
+            "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
         },
     )
 
@@ -2030,6 +2096,8 @@ def direction_from_probabilities(probabilities: pd.DataFrame, decision_params: d
     label_by_column = {"prob_down": DIRECTION_DOWN, "prob_up": DIRECTION_UP, "prob_flat": DIRECTION_FLAT}
     if decision_params and decision_params.get("mode") == "majority_class":
         label = int(decision_params.get("label", DIRECTION_FLAT))
+        if RISK_TARGET_ENABLED and label == DIRECTION_UP:
+            label = DIRECTION_FLAT
         return pd.Series(label, index=probabilities.index).astype(int)
     if decision_params and decision_params.get("mode") == "direction_gate":
         columns = probabilities[["prob_down", "prob_up", "prob_flat"]].fillna(0)
@@ -2038,12 +2106,18 @@ def direction_from_probabilities(probabilities: pd.DataFrame, decision_params: d
         flat = columns["prob_flat"].to_numpy(dtype=float)
         min_direction_prob = float(decision_params.get("min_direction_prob", 0.34))
         min_direction_margin = float(decision_params.get("min_direction_margin", 0.0))
+        if RISK_TARGET_ENABLED:
+            use_down = (down >= min_direction_prob) & ((down - flat) >= min_direction_margin)
+            return pd.Series(np.where(use_down, DIRECTION_DOWN, DIRECTION_FLAT), index=probabilities.index).astype(int)
         direction_is_up = up >= down
         direction_prob = np.where(direction_is_up, up, down)
         direction_label = np.where(direction_is_up, DIRECTION_UP, DIRECTION_DOWN)
         use_direction = (direction_prob >= min_direction_prob) & ((direction_prob - flat) >= min_direction_margin)
         return pd.Series(np.where(use_direction, direction_label, DIRECTION_FLAT), index=probabilities.index).astype(int)
-    return probabilities[["prob_down", "prob_up", "prob_flat"]].idxmax(axis=1).map(label_by_column).astype(int)
+    predictions = probabilities[["prob_down", "prob_up", "prob_flat"]].idxmax(axis=1).map(label_by_column).astype(int)
+    if RISK_TARGET_ENABLED:
+        predictions = predictions.where(predictions != DIRECTION_UP, DIRECTION_FLAT)
+    return predictions
 
 
 def apply_return_signal_override(frame: pd.DataFrame, threshold: float | None = None) -> pd.DataFrame:
@@ -2055,7 +2129,8 @@ def apply_return_signal_override(frame: pd.DataFrame, threshold: float | None = 
     if threshold_value <= 0:
         return result
     predicted_return = pd.to_numeric(result["predicted_return"], errors="coerce").fillna(0.0)
-    result.loc[predicted_return >= threshold_value, "predicted_direction"] = DIRECTION_UP
+    if not RISK_TARGET_ENABLED:
+        result.loc[predicted_return >= threshold_value, "predicted_direction"] = DIRECTION_UP
     result.loc[predicted_return <= -threshold_value, "predicted_direction"] = DIRECTION_DOWN
     result["predicted_signal"] = result["predicted_direction"].map(DIRECTION_SIGNAL_MAP)
     return result
@@ -2083,14 +2158,37 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
         balanced = float(balanced_accuracy_score(y_true, predictions))
         macro_f1 = float(f1_score(y_true, predictions, labels=DIRECTION_LABELS, average="macro", zero_division=0))
         lift = accuracy - baseline_accuracy
-        score = balanced * 0.45 + macro_f1 * 0.30 + max(lift, -0.20) * 0.25
-        if lift < 0:
-            score -= min(abs(lift), 0.30) * 1.2
+        matrix = confusion_matrix(y_true, predictions, labels=DIRECTION_LABELS)
+        down_true_positive = float(matrix[DIRECTION_DOWN, DIRECTION_DOWN])
+        down_actual = float(matrix[DIRECTION_DOWN, :].sum())
+        down_predicted = float(matrix[:, DIRECTION_DOWN].sum())
+        down_recall = down_true_positive / down_actual if down_actual else 0.0
+        down_precision = down_true_positive / down_predicted if down_predicted else 0.0
+        predicted_down_ratio = down_predicted / float(max(y_true.size, 1))
+        if RISK_TARGET_ENABLED:
+            score = (
+                down_recall * 0.42
+                + down_precision * 0.24
+                + balanced * 0.18
+                + macro_f1 * 0.10
+                + max(lift, -0.20) * 0.06
+            )
+            if predicted_down_ratio < 0.03:
+                score -= (0.03 - predicted_down_ratio) * 2.0
+            if predicted_down_ratio > 0.45:
+                score -= (predicted_down_ratio - 0.45) * 1.0
+        else:
+            score = balanced * 0.45 + macro_f1 * 0.30 + max(lift, -0.20) * 0.25
+            if lift < 0:
+                score -= min(abs(lift), 0.30) * 1.2
         return {
             "accuracy": accuracy,
             "balanced": balanced,
             "macro_f1": macro_f1,
             "lift": lift,
+            "down_recall": down_recall,
+            "down_precision": down_precision,
+            "predicted_down_ratio": predicted_down_ratio,
             "score": score,
         }
 
@@ -2109,12 +2207,20 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
             if metrics["score"] > best_metrics["score"] + 1e-6:
                 best_metrics = metrics
                 best_params = params
-    if best_metrics["lift"] >= BASELINE_GUARD_LIFT_FLOOR:
+    if best_metrics["lift"] >= BASELINE_GUARD_LIFT_FLOOR or (
+        RISK_TARGET_ENABLED
+        and best_metrics["down_recall"] > 0
+        and best_metrics["down_precision"] >= 0.10
+        and best_metrics["predicted_down_ratio"] >= 0.03
+    ):
         return {
             **(best_params or {"mode": "argmax"}),
             "calibration_accuracy": best_metrics["accuracy"],
             "calibration_majority_baseline": baseline_accuracy,
             "calibration_lift_over_baseline": best_metrics["lift"],
+            "calibration_down_recall": best_metrics["down_recall"],
+            "calibration_down_precision": best_metrics["down_precision"],
+            "calibration_predicted_down_ratio": best_metrics["predicted_down_ratio"],
         }
     return {
         "mode": "majority_class",
@@ -2140,6 +2246,8 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
         result["alert_direction"] = result["predicted_direction"]
     up_threshold = float(settings.ml_alert_up_confidence_threshold)
     down_threshold = float(settings.ml_alert_down_confidence_threshold)
+    if RISK_TARGET_ENABLED:
+        down_threshold = min(down_threshold, 0.68)
     movement_threshold = abs(float(movement_threshold if movement_threshold is not None else DIRECTION_FIXED_THRESHOLD or MIN_DIRECTION_RETURN))
     confidence = pd.to_numeric(result["confidence"], errors="coerce").fillna(0)
     low_confidence_up = (result["predicted_signal"] == "UP") & (confidence < up_threshold)
@@ -2147,7 +2255,8 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
     weak_down_return = pd.Series(False, index=result.index)
     if "predicted_return" in result.columns:
         predicted_return = pd.to_numeric(result["predicted_return"], errors="coerce").fillna(0.0)
-        weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > -movement_threshold)
+        down_return_floor = 0.0 if RISK_TARGET_ENABLED else -movement_threshold
+        weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > down_return_floor)
     weak_alert = low_confidence_up | low_confidence_down | weak_down_return
     if not weak_alert.any():
         result["alert_signal"] = result["alert_signal"].where(result["alert_signal"].isin({"UP", "DOWN", "WATCH"}), "WATCH")
@@ -2253,6 +2362,27 @@ def ensemble_weight_score(result: ModelResult) -> float:
     calibration_lift = metric_value(result, "_calibration_lift_over_baseline", 0.0)
     alert_hit = metric_value(result, "_alert_backtest_hit_rate", 0.0)
     alert_coverage = metric_value(result, "_alert_backtest_coverage", 0.0)
+    if RISK_TARGET_ENABLED:
+        down_recall = metric_value(result, "_walk_forward_down_recall", metric_value(result, "_down_recall", 0.0))
+        down_precision = metric_value(result, "_walk_forward_down_precision", metric_value(result, "_down_precision", 0.0))
+        down_coverage = metric_value(result, "_walk_forward_predicted_down_ratio", metric_value(result, "_predicted_down_ratio", 0.0))
+        down_hit = metric_value(result, "_alert_backtest_down_hit_rate", alert_hit)
+        down_inverse_return = metric_value(result, "_alert_backtest_down_avg_inverse_return", 0.0)
+        if down_recall <= 0 or down_coverage <= 0:
+            return 0.005
+        score = (
+            down_recall * 0.38
+            + down_precision * 0.22
+            + wf_balanced * 0.16
+            + macro_f1 * 0.10
+            + min(max(down_hit - 0.35, 0.0), 0.35) * 0.08
+            + min(max(down_inverse_return, 0.0), 0.08) * 0.06
+        )
+        if down_coverage < 0.03:
+            score *= 0.50
+        if down_coverage > 0.45:
+            score *= 0.70
+        return max(float(score), 0.005)
     if lift <= -0.03 or primary_lift <= -0.03:
         return 0.005
     score = (
@@ -2357,6 +2487,8 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
                 metrics.append(("ensemble", f"{model_name}_weight", float(weight / total_weight)))
     metrics.append(("prediction", "return_signal_override_threshold", float(PREDICTION_RETURN_SIGNAL_THRESHOLD)))
     metrics.append(("prediction", "prediction_horizon", float(PREDICTION_HORIZON)))
+    metrics.append(("prediction", "target_downside_risk_enabled", 1.0 if RISK_TARGET_ENABLED else 0.0))
+    metrics.append(("prediction", "risk_volatility_threshold", float(RISK_VOLATILITY_THRESHOLD)))
     metrics.append(("selection", "best_model_code", float({"random_forest": 1, "lightgbm": 2, "lstm": 3}.get(best_model_name, 0))))
     return metrics
 

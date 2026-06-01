@@ -157,7 +157,10 @@ def main() -> None:
     stock_ml.DIRECTION_FIXED_THRESHOLD = args.direction_threshold
     stock_ml.PREDICTION_HORIZON = selected_horizon
     stock_ml.LSTM_WINDOW_SIZE = max(5, int(stock_ml.settings.ml_lstm_window_size))
-    print(f"[daily-ml] prediction_horizon={selected_horizon}, horizon_experiments={experiment_horizons}", flush=True)
+    print(
+        f"[daily-ml] target_mode={stock_ml.ML_TARGET_MODE}, prediction_horizon={selected_horizon}, horizon_experiments={experiment_horizons}",
+        flush=True,
+    )
     if args.direction_threshold is not None:
         print(f"[daily-ml] override all model direction_threshold={args.direction_threshold}", flush=True)
     else:
