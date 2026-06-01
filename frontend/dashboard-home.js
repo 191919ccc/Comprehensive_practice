@@ -74,9 +74,11 @@
         const icon=value==="UP"?"▲":value==="DOWN"?"▼":value==="WATCH"?"—":"?";
         return `<span class="signal-tag ${clsName}">${icon} ${esc(value==="WATCH"?"WATCH":value)}</span>`;
     }
-    function isFlatWatch(row){return (row?.predicted_signal||"WATCH")==="WATCH" && Math.abs(num(row?.predicted_gap))<=0.02 && num(row?.confidence)>=.95;}
+    function isFlatWatch(row){return (row?.alert_signal||row?.predicted_signal||"WATCH")==="WATCH" && Math.abs(num(row?.predicted_gap))<=0.02 && num(row?.confidence)>=.95;}
     function predictionState(row){
-        const signal=row?.predicted_signal||"WATCH", c=Math.round(num(row?.confidence)*100);
+        const risk=num(row?.final_risk_score);
+        if(risk>0) return {text:`风险${Math.round(risk*100)}%`, cls:risk>=.55?"r":risk>=.35?"a":"g"};
+        const signal=row?.alert_signal||row?.predicted_signal||"WATCH", c=Math.round(num(row?.confidence)*100);
         if(isFlatWatch(row)) return {text:"低波动", cls:"a"};
         if(!c) return {text:"--", cls:"muted"};
         return {text:`${c}%`, cls:c>=70?"g":c>=55?"a":"r"};
@@ -430,7 +432,7 @@
         body.innerHTML="";
         if(!rows.length){body.innerHTML='<tr><td colspan="3">暂无预测</td></tr>'; return;}
         rows.slice(0,6).forEach(r=>{
-            const signal=r.predicted_signal||"WATCH", state=predictionState(r);
+            const signal=r.alert_signal||r.predicted_signal||"WATCH", state=predictionState(r);
             const tr=document.createElement("tr");
             tr.innerHTML=`<td>${esc(r.symbol)}<br><span class="muted">${esc(r.company_name||"")}</span></td><td>${signalTag(signal)}</td><td class="${state.cls}">${state.text}</td>`;
             body.appendChild(tr);
@@ -626,7 +628,7 @@
     }
     function buildPrompt(){
         const data=window.latestDashboard||{}, s=data.summary||{};
-        const picks=(data.ml_predictions||[]).slice(0,5).map(r=>`${r.symbol} ${r.company_name} 方向${textMap[r.predicted_signal]||r.predicted_signal} 状态${predictionState(r).text}`).join("\\n");
+        const picks=(data.ml_predictions||[]).slice(0,5).map(r=>`${r.symbol} ${r.company_name} 方向${textMap[r.alert_signal||r.predicted_signal]||r.alert_signal||r.predicted_signal} 状态${predictionState(r).text}`).join("\\n");
         return `请基于股票实时流分析平台数据生成课堂答辩用分析：监控股票${s.symbol_count||0}只，平均涨跌幅${pct(s.avg_change_pct)}，近30分钟告警${s.alert_count||0}条。模型预测如下：\\n${picks||"暂无预测"}\\n请输出市场结论、重点关注股票、风险提示和模型局限。`;
     }
     async function openAiPrompt(text){

@@ -82,6 +82,8 @@ class Settings:
     ml_lstm_learning_rate = float(os.getenv("ML_LSTM_LEARNING_RATE", "0.0003"))
     ml_lstm_weight_decay = float(os.getenv("ML_LSTM_WEIGHT_DECAY", "0.002"))
     ml_lstm_batch_size = int(os.getenv("ML_LSTM_BATCH_SIZE", "128"))
+    ml_lstm_aux_max_weight = float(os.getenv("ML_LSTM_AUX_MAX_WEIGHT", "0.10"))
+    ml_lightgbm_min_weight = float(os.getenv("ML_LIGHTGBM_MIN_WEIGHT", "0.85"))
     ml_rf_full_calibration = os.getenv("ML_RF_FULL_CALIBRATION", "true").strip().lower() in {"1", "true", "yes", "on"}
     ml_rf_walk_forward = os.getenv("ML_RF_WALK_FORWARD", "true").strip().lower() in {"1", "true", "yes", "on"}
     ml_rf_n_jobs = int(os.getenv("ML_RF_N_JOBS", "4"))

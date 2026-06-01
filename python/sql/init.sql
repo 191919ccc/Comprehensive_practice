@@ -168,11 +168,16 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     predicted_signal VARCHAR(16) NOT NULL COMMENT '模型原始预测方向信号，例如 UP、DOWN、WATCH',
     alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '经过置信度过滤后的告警侧信号',
     confidence DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '融合预测置信度，范围0到1',
+    model_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '模型下跌风险概率分数',
+    technical_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '价格量能和相对弱势证据分数',
+    sequence_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT 'LSTM序列辅助风险分数',
+    final_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '最终下跌风险评分',
     model_version VARCHAR(64) NOT NULL COMMENT '模型版本号',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
     KEY idx_ml_predictions_symbol_created_at (symbol, created_at),
     KEY idx_ml_predictions_signal_created_at (predicted_signal, created_at),
-    KEY idx_ml_predictions_alert_signal_created_at (alert_signal, created_at)
+    KEY idx_ml_predictions_alert_signal_created_at (alert_signal, created_at),
+    KEY idx_ml_predictions_final_risk_score (final_risk_score)
 ) COMMENT='机器学习预测结果表';
 
 CREATE TABLE IF NOT EXISTS ml_prediction_history (
@@ -186,12 +191,17 @@ CREATE TABLE IF NOT EXISTS ml_prediction_history (
     predicted_signal VARCHAR(16) NOT NULL COMMENT '模型原始预测方向信号，例如 UP、DOWN、WATCH',
     alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '经过置信度过滤后的告警侧信号',
     confidence DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '预测置信度，范围0到1',
+    model_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '模型下跌风险概率分数',
+    technical_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '价格量能和相对弱势证据分数',
+    sequence_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT 'LSTM序列辅助风险分数',
+    final_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '最终下跌风险评分',
     model_version VARCHAR(64) NOT NULL COMMENT '模型版本号',
     predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '预测生成时间',
     KEY idx_ml_prediction_history_symbol_time (symbol, predicted_at),
     KEY idx_ml_prediction_history_model_time (model_version, predicted_at),
     KEY idx_ml_prediction_history_signal_time (predicted_signal, predicted_at),
-    KEY idx_ml_prediction_history_alert_signal_time (alert_signal, predicted_at)
+    KEY idx_ml_prediction_history_alert_signal_time (alert_signal, predicted_at),
+    KEY idx_ml_prediction_history_final_risk_score (final_risk_score)
 ) COMMENT='机器学习预测历史表，用于模型漂移检测';
 
 CREATE TABLE IF NOT EXISTS ml_model_metrics (

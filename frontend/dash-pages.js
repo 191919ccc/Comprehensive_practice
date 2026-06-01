@@ -870,10 +870,12 @@ function renderRanking(id, rows = [], scoreKey) {
         const rawSignal = String(row.predicted_signal || "NONE").toUpperCase();
         const conservativeSignal = String(displaySignal || "NONE").toUpperCase();
         const rawSignalText = rawSignal !== conservativeSignal && rawSignal !== "NONE" ? `，原始模型：${escapeHtml(signalText(rawSignal))}` : "";
+        const finalRisk = Number(row.final_risk_score || 0);
+        const riskText = finalRisk > 0 ? `，风险评分：${formatNumber(finalRisk * 100, 1)}%` : "";
         item.innerHTML = `
             <div>
                 <strong>${index + 1}. ${escapeHtml(row.symbol)} ${escapeHtml(row.company_name)}</strong>
-                <p>${escapeHtml(row.category || "")} / ${escapeHtml(row.sector || "")}，保守信号：${signalTag(displaySignal)}${rawSignalText}</p>
+                <p>${escapeHtml(row.category || "")} / ${escapeHtml(row.sector || "")}，保守信号：${signalTag(displaySignal)}${rawSignalText}${riskText}</p>
             </div>
             <span class="mono ${scoreKey === "risk_score" ? "warn" : "up"}">${formatNumber(row[scoreKey])}</span>
         `;

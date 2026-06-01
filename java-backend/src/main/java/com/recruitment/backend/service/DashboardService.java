@@ -75,6 +75,25 @@ public class DashboardService {
         } catch (Exception ignored) {
             // Existing deployments may already have the column.
         }
+        String[] predictionScoreColumns = {
+                "model_risk_score",
+                "technical_risk_score",
+                "sequence_risk_score",
+                "final_risk_score"
+        };
+        for (String tableName : new String[]{"ml_predictions", "ml_prediction_history"}) {
+            for (String columnName : predictionScoreColumns) {
+                try {
+                    jdbcTemplate.execute("""
+                            ALTER TABLE %s
+                            ADD COLUMN %s DECIMAL(8,4) NOT NULL DEFAULT 0 COMMENT 'risk score for model display'
+                            AFTER confidence
+                            """.formatted(tableName, columnName));
+                } catch (Exception ignored) {
+                    // Existing deployments may already have the column.
+                }
+            }
+        }
         try {
             jdbcTemplate.execute("""
                     ALTER TABLE alert_events
@@ -269,11 +288,16 @@ public class DashboardService {
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
                     COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(m.model_risk_score, 0), 4) AS model_risk_score,
+                    ROUND(COALESCE(m.technical_risk_score, 0), 4) AS technical_risk_score,
+                    ROUND(COALESCE(m.sequence_risk_score, 0), 4) AS sequence_risk_score,
+                    ROUND(COALESCE(m.final_risk_score, 0), 4) AS final_risk_score,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap,
                     ROUND(
                         ABS(t.change_pct) * 12
                         + LEAST(LOG10(GREATEST(t.volume, 1)), 10) * 4
                         + COALESCE(a.risk_score, 0) * 18
+                        + COALESCE(m.final_risk_score, 0) * 25
                         + CASE COALESCE(NULLIF(m.alert_signal, ''), 'WATCH')
                             WHEN 'UP' THEN 8
                             WHEN 'DOWN' THEN 8
@@ -428,6 +452,10 @@ public class DashboardService {
                     predicted_signal,
                     COALESCE(NULLIF(alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(model_risk_score, 0), 4) AS model_risk_score,
+                    ROUND(COALESCE(technical_risk_score, 0), 4) AS technical_risk_score,
+                    ROUND(COALESCE(sequence_risk_score, 0), 4) AS sequence_risk_score,
+                    ROUND(COALESCE(final_risk_score, 0), 4) AS final_risk_score,
                     model_version,
                     DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
                 FROM ml_predictions
@@ -560,7 +588,9 @@ public class DashboardService {
                     t.source,
                     COALESCE(a.alert_count, 0) AS alert_count,
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
+                    COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(m.final_risk_score, 0), 4) AS final_risk_score,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap
                 FROM price_ticks t
                 INNER JOIN (
@@ -616,8 +646,13 @@ public class DashboardService {
                     COALESCE(a.alert_count, 0) AS alert_count,
                     COALESCE(a.high_alert_count, 0) AS high_alert_count,
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
+                    COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.predicted_next_price, 0), 2) AS predicted_next_price,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(m.model_risk_score, 0), 4) AS model_risk_score,
+                    ROUND(COALESCE(m.technical_risk_score, 0), 4) AS technical_risk_score,
+                    ROUND(COALESCE(m.sequence_risk_score, 0), 4) AS sequence_risk_score,
+                    ROUND(COALESCE(m.final_risk_score, 0), 4) AS final_risk_score,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap,
                     COALESCE(m.model_version, '') AS model_version
                 FROM price_ticks t
@@ -910,6 +945,10 @@ public class DashboardService {
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
                     COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(m.model_risk_score, 0), 4) AS model_risk_score,
+                    ROUND(COALESCE(m.technical_risk_score, 0), 4) AS technical_risk_score,
+                    ROUND(COALESCE(m.sequence_risk_score, 0), 4) AS sequence_risk_score,
+                    ROUND(COALESCE(m.final_risk_score, 0), 4) AS final_risk_score,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap,
                     ROUND(COALESCE(h.avg_change_pct, 0), 2) AS sector_avg_change_pct,
                     ROUND(
@@ -918,9 +957,10 @@ public class DashboardService {
                         + LEAST(LOG10(GREATEST(t.volume, 1)) * 3, 30)
                         + CASE COALESCE(NULLIF(m.alert_signal, ''), 'WATCH')
                             WHEN 'UP' THEN 18
-                            WHEN 'DOWN' THEN -12
+                            WHEN 'DOWN' THEN -18
                             ELSE 0
                           END
+                        - COALESCE(m.final_risk_score, 0) * 35
                         + GREATEST(COALESCE(h.avg_change_pct, 0), 0) * 6
                         - COALESCE(a.alert_count, 0) * 8
                         - COALESCE(a.high_alert_count, 0) * 12,
@@ -930,12 +970,13 @@ public class DashboardService {
                         ABS(t.change_pct) * 12
                         + COALESCE(a.alert_count, 0) * 20
                         + COALESCE(a.high_alert_count, 0) * 18
-                        + LEAST(LOG10(GREATEST(t.volume, 1)) * 4, 40),
+                        + LEAST(LOG10(GREATEST(t.volume, 1)) * 4, 40)
+                        + COALESCE(m.final_risk_score, 0) * 70,
                         2
                     ) AS risk_score,
                     CONCAT(
                         CASE WHEN t.change_pct > 0 THEN '价格动量为正；' ELSE '价格动量偏弱；' END,
-                        CASE COALESCE(m.predicted_signal, 'NONE')
+                        CASE COALESCE(NULLIF(m.alert_signal, ''), 'WATCH')
                             WHEN 'UP' THEN '模型看涨；'
                             WHEN 'DOWN' THEN '模型看跌；'
                             ELSE '模型暂无明显方向；'
@@ -1128,7 +1169,12 @@ public class DashboardService {
                     ROUND(predicted_next_price, 2) AS predicted_next_price,
                     ROUND(predicted_next_price - current_price, 2) AS predicted_gap,
                     predicted_signal,
+                    COALESCE(NULLIF(alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(confidence, 0), 4) AS confidence,
+                    ROUND(COALESCE(model_risk_score, 0), 4) AS model_risk_score,
+                    ROUND(COALESCE(technical_risk_score, 0), 4) AS technical_risk_score,
+                    ROUND(COALESCE(sequence_risk_score, 0), 4) AS sequence_risk_score,
+                    ROUND(COALESCE(final_risk_score, 0), 4) AS final_risk_score,
                     model_version,
                     DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
                 FROM ml_predictions

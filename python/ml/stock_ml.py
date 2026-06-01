@@ -153,6 +153,8 @@ RISK_DOWNSIDE_THRESHOLD = max(0.0, float(settings.ml_risk_downside_threshold))
 RISK_VOLATILITY_THRESHOLD = max(0.0, float(settings.ml_risk_volatility_threshold))
 RISK_ALERT_MIN_RETURN = max(0.0, float(settings.ml_risk_alert_min_return))
 DOWN_ALERT_RISK_SCORE_THRESHOLD = max(0.0, float(settings.ml_down_alert_risk_score_threshold))
+LSTM_AUX_MAX_WEIGHT = min(0.30, max(0.0, float(settings.ml_lstm_aux_max_weight)))
+LIGHTGBM_MIN_WEIGHT = min(1.0, max(0.0, float(settings.ml_lightgbm_min_weight)))
 DIRECTION_VOLATILITY_WINDOW = 20
 DIRECTION_THRESHOLD_MULTIPLIER = 1.0
 THRESHOLD_EXPERIMENTS = [0.003, 0.005, 0.01, 0.015, 0.02]
@@ -2390,9 +2392,18 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
         down_score, evidence_count = downside_risk_score(result)
         result["down_risk_score"] = down_score
         result["down_evidence_count"] = evidence_count
+        result["model_risk_score"] = numeric_series(result, "prob_down").clip(0, 1)
+        result["technical_risk_score"] = down_score
+        result["sequence_risk_score"] = numeric_series(result, "sequence_risk_score").clip(0, 1)
+        result["final_risk_score"] = down_score
         weak_down_evidence = (result["predicted_signal"] == "DOWN") & (
             (down_score < DOWN_ALERT_RISK_SCORE_THRESHOLD) | (evidence_count < 1)
         )
+    else:
+        result["model_risk_score"] = numeric_series(result, "prob_down").clip(0, 1)
+        result["technical_risk_score"] = 0.0
+        result["sequence_risk_score"] = numeric_series(result, "sequence_risk_score").clip(0, 1)
+        result["final_risk_score"] = result["model_risk_score"]
     weak_alert = low_confidence_up | low_confidence_down | weak_down_return | weak_down_evidence
     if not weak_alert.any():
         result["alert_signal"] = result["alert_signal"].where(result["alert_signal"].isin({"UP", "DOWN", "WATCH"}), "WATCH")
@@ -2431,6 +2442,7 @@ def predict_latest_tabular(df: pd.DataFrame, model_result: ModelResult, version:
     latest["predicted_signal"] = latest["predicted_direction"].map(DIRECTION_SIGNAL_MAP)
     latest = apply_return_signal_override(latest)
     latest["confidence"] = display_confidence(probabilities)
+    latest["sequence_risk_score"] = 0.0
     latest["model_version"] = f"{model_result.name}-{version}"
     return apply_alert_confidence_filter(latest, movement_threshold=model_direction_threshold(model_result))
 
@@ -2477,6 +2489,7 @@ def predict_latest_lstm(df: pd.DataFrame, model_result: ModelResult, version: st
     latest["predicted_signal"] = latest["predicted_direction"].map(DIRECTION_SIGNAL_MAP)
     latest = apply_return_signal_override(latest)
     latest["confidence"] = display_confidence(latest[["prob_down", "prob_up", "prob_flat"]])
+    latest["sequence_risk_score"] = pd.to_numeric(latest["prob_down"], errors="coerce").fillna(0.0).clip(0, 1)
     latest["model_version"] = f"{model_result.name}-{version}"
     return apply_alert_confidence_filter(latest, movement_threshold=model_direction_threshold(model_result))
 
@@ -2552,24 +2565,80 @@ def ensemble_weight_score(result: ModelResult) -> float:
     return float(score)
 
 
+def normalized_ensemble_weights(results: list[ModelResult]) -> dict[str, float]:
+    """Build production weights with LightGBM as the risk model anchor.
+
+    LSTM is useful as a sequence feature extractor, but recent experiments show
+    it can dominate the ensemble while producing unstable DOWN calls. In risk
+    mode it is capped as an auxiliary signal and LightGBM keeps the main vote.
+    """
+    raw_weights = {result.name: ensemble_weight_score(result) for result in results}
+    raw_weights = {name: weight for name, weight in raw_weights.items() if weight > 0}
+    if not raw_weights:
+        return {}
+
+    if not RISK_TARGET_ENABLED or "lightgbm" not in raw_weights:
+        total = sum(raw_weights.values())
+        return {name: float(weight / total) for name, weight in raw_weights.items()} if total > 0 else {}
+
+    lightgbm_min_weight = min(max(LIGHTGBM_MIN_WEIGHT, 0.0), 1.0)
+    aux_budget = max(0.0, 1.0 - lightgbm_min_weight)
+    aux_names = [name for name in raw_weights if name != "lightgbm"]
+    aux_scores = {name: raw_weights[name] for name in aux_names}
+    aux_total = sum(aux_scores.values())
+    weights: dict[str, float] = {}
+
+    if aux_total > 0 and aux_budget > 0:
+        by_name = {result.name: result for result in results}
+        for name, score in aux_scores.items():
+            cap = aux_budget
+            result = by_name.get(name)
+            if name == "lstm":
+                cap = min(cap, LSTM_AUX_MAX_WEIGHT)
+                if result is not None:
+                    wf_lift = metric_value(result, "_walk_forward_direction_lift_over_baseline", 0.0)
+                    down_inverse_return = metric_value(result, "_alert_backtest_down_avg_inverse_return", 0.0)
+                    guard_used = metric_value(result, "_walk_forward_validation_guard_used", 0.0)
+                    down_coverage = metric_value(result, "_walk_forward_predicted_down_ratio", 0.0)
+                    if wf_lift <= 0 or down_inverse_return <= 0 or guard_used >= 1:
+                        cap = min(cap, 0.05)
+                    if down_coverage > 0.55:
+                        cap = min(cap, 0.03)
+            elif name == "random_forest":
+                cap = min(cap, 0.05)
+            weights[name] = min(aux_budget * score / aux_total, cap)
+
+    aux_sum = min(sum(weights.values()), max(0.0, 1.0 - lightgbm_min_weight))
+    weights["lightgbm"] = max(lightgbm_min_weight, 1.0 - aux_sum)
+    total = sum(weights.values())
+    return {name: float(weight / total) for name, weight in weights.items()} if total > 0 else {"lightgbm": 1.0}
+
+
 def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], version: str, index_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Combine available model probabilities with walk-forward-based dynamic weights."""
     model_map = {result.name: result for result in results}
-    candidates = [model_map[name] for name in ("lstm", "lightgbm", "random_forest") if name in model_map]
+    candidates = [model_map[name] for name in ("lightgbm", "lstm", "random_forest") if name in model_map]
     if len(candidates) < 2:
         fallback_results = [result for result in results if result.name != "random_forest"] or results
         return predict_latest(df, select_best_model(fallback_results), version, index_df)
 
+    weights = normalized_ensemble_weights(candidates)
     weighted_predictions: list[tuple[str, float, pd.DataFrame]] = []
     for result in candidates:
+        weight = weights.get(result.name, 0.0)
+        if weight <= 0:
+            continue
         prediction = predict_latest_lstm(df, result, version, index_df) if result.model_type == "sequence" else predict_latest_tabular(df, result, version, index_df)
-        weighted_predictions.append((result.name, ensemble_weight_score(result), prediction))
+        weighted_predictions.append((result.name, weight, prediction))
+    if len(weighted_predictions) < 2:
+        fallback_results = [result for result in results if result.name != "random_forest"] or results
+        return predict_latest(df, select_best_model(fallback_results), version, index_df)
 
     base_columns = ["symbol", "company_name", "category", "sector", "last_price"]
     evidence_columns = [column for column in DOWN_RISK_EVIDENCE_COLUMNS if column in weighted_predictions[0][2].columns]
     merged = weighted_predictions[0][2][[*base_columns, *evidence_columns]].copy()
     for name, _, prediction in weighted_predictions:
-        model_columns = ["symbol", "predicted_next_price", "prob_down", "prob_up", "prob_flat"]
+        model_columns = ["symbol", "predicted_next_price", "prob_down", "prob_up", "prob_flat", "sequence_risk_score"]
         renamed = prediction[model_columns].rename(
             columns={column: f"{column}_{name}" for column in model_columns if column != "symbol"}
         )
@@ -2590,6 +2659,9 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     for column in ("prob_down", "prob_up", "prob_flat"):
         merged[column] = (sum(merged[f"{column}_{name}"] * weight for name, weight, _ in weighted_predictions) / total_weight).clip(0, 1)
+    merged["sequence_risk_score"] = (
+        sum(merged[f"sequence_risk_score_{name}"] * weight for name, weight, _ in weighted_predictions) / total_weight
+    ).clip(0, 1)
     probabilities = merged[["prob_down", "prob_up", "prob_flat"]]
     merged["predicted_direction"] = direction_from_probabilities(probabilities)
     merged["confidence"] = display_confidence(probabilities)
@@ -2608,6 +2680,10 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
             "predicted_signal",
             "alert_signal",
             "confidence",
+            "model_risk_score",
+            "technical_risk_score",
+            "sequence_risk_score",
+            "final_risk_score",
             "model_version",
         ]
     ]
@@ -2622,11 +2698,8 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
             metrics.append((result.name, normalized_metric, float(metric_value)))
     ensemble_candidates = [result for result in results if result.name in {"lstm", "lightgbm", "random_forest"}]
     if len(ensemble_candidates) >= 2:
-        raw_weights = {result.name: ensemble_weight_score(result) for result in ensemble_candidates}
-        total_weight = sum(raw_weights.values())
-        if total_weight > 0:
-            for model_name, weight in raw_weights.items():
-                metrics.append(("ensemble", f"{model_name}_weight", float(weight / total_weight)))
+        for model_name, weight in normalized_ensemble_weights(ensemble_candidates).items():
+            metrics.append(("ensemble", f"{model_name}_weight", float(weight)))
     metrics.append(("prediction", "return_signal_override_threshold", float(PREDICTION_RETURN_SIGNAL_THRESHOLD)))
     metrics.append(("prediction", "prediction_horizon", float(PREDICTION_HORIZON)))
     metrics.append(("prediction", "target_downside_risk_enabled", 1.0 if RISK_TARGET_ENABLED else 0.0))
@@ -2634,6 +2707,8 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
     metrics.append(("prediction", "risk_volatility_threshold", float(RISK_VOLATILITY_THRESHOLD)))
     metrics.append(("prediction", "risk_alert_min_return", float(RISK_ALERT_MIN_RETURN)))
     metrics.append(("prediction", "down_alert_risk_score_threshold", float(DOWN_ALERT_RISK_SCORE_THRESHOLD)))
+    metrics.append(("prediction", "lstm_aux_max_weight", float(LSTM_AUX_MAX_WEIGHT)))
+    metrics.append(("prediction", "lightgbm_min_weight", float(LIGHTGBM_MIN_WEIGHT)))
     metrics.append(("selection", "best_model_code", float({"random_forest": 1, "lightgbm": 2, "lstm": 3}.get(best_model_name, 0))))
     return metrics
 
@@ -2664,6 +2739,10 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
                     predicted_signal VARCHAR(16) NOT NULL,
                     alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH',
                     confidence DECIMAL(8, 4) NOT NULL DEFAULT 0,
+                    model_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0,
+                    technical_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0,
+                    sequence_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0,
+                    final_risk_score DECIMAL(8, 4) NOT NULL DEFAULT 0,
                     model_version VARCHAR(64) NOT NULL,
                     predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     KEY idx_ml_prediction_history_symbol_time (symbol, predicted_at),
@@ -2684,6 +2763,23 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
                     )
                 except Exception:
                     pass
+            for table_name in ("ml_predictions", "ml_prediction_history"):
+                for column_name in (
+                    "model_risk_score",
+                    "technical_risk_score",
+                    "sequence_risk_score",
+                    "final_risk_score",
+                ):
+                    try:
+                        cursor.execute(
+                            f"""
+                            ALTER TABLE {table_name}
+                            ADD COLUMN {column_name} DECIMAL(8, 4) NOT NULL DEFAULT 0
+                            AFTER confidence
+                            """
+                        )
+                    except Exception:
+                        pass
             cursor.execute("DELETE FROM ml_predictions")
             if update_metrics:
                 cursor.execute("DELETE FROM ml_model_metrics")
@@ -2704,6 +2800,10 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
                     raw_signal,
                     alert_signal,
                     float(getattr(row, "confidence", 0.0)),
+                    float(getattr(row, "model_risk_score", 0.0)),
+                    float(getattr(row, "technical_risk_score", 0.0)),
+                    float(getattr(row, "sequence_risk_score", 0.0)),
+                    float(getattr(row, "final_risk_score", 0.0)),
                     row.model_version,
                 )
                 history_values = (
@@ -2716,21 +2816,27 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
                     raw_signal,
                     alert_signal,
                     float(getattr(row, "confidence", 0.0)),
+                    float(getattr(row, "model_risk_score", 0.0)),
+                    float(getattr(row, "technical_risk_score", 0.0)),
+                    float(getattr(row, "sequence_risk_score", 0.0)),
+                    float(getattr(row, "final_risk_score", 0.0)),
                     row.model_version,
                 )
                 cursor.execute(
                     """
                     INSERT INTO ml_predictions
-                    (symbol, company_name, category, sector, current_price, predicted_next_price, predicted_signal, alert_signal, confidence, model_version)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (symbol, company_name, category, sector, current_price, predicted_next_price, predicted_signal, alert_signal,
+                     confidence, model_risk_score, technical_risk_score, sequence_risk_score, final_risk_score, model_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     current_values,
                 )
                 cursor.execute(
                     """
                     INSERT INTO ml_prediction_history
-                    (symbol, company_name, category, sector, current_price, predicted_next_price, predicted_signal, alert_signal, confidence, model_version)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (symbol, company_name, category, sector, current_price, predicted_next_price, predicted_signal, alert_signal,
+                     confidence, model_risk_score, technical_risk_score, sequence_risk_score, final_risk_score, model_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     history_values,
                 )
