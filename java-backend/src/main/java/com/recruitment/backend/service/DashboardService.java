@@ -400,9 +400,11 @@ public class DashboardService {
                 LIMIT 6
                 """));
         response.put("signal_distribution", fetchRows("""
-                SELECT predicted_signal, COUNT(*) AS prediction_count
+                SELECT
+                    COALESCE(NULLIF(alert_signal, ''), 'WATCH') AS predicted_signal,
+                    COUNT(*) AS prediction_count
                 FROM ml_predictions
-                GROUP BY predicted_signal
+                GROUP BY COALESCE(NULLIF(alert_signal, ''), 'WATCH')
                 ORDER BY prediction_count DESC
                 """));
         response.put("ml_predictions", fetchRows("""
@@ -415,6 +417,7 @@ public class DashboardService {
                     predicted_next_price,
                     ROUND(predicted_next_price - current_price, 2) AS predicted_gap,
                     predicted_signal,
+                    COALESCE(NULLIF(alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(confidence, 0), 4) AS confidence,
                     model_version,
                     DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at

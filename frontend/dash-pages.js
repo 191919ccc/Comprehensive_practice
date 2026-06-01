@@ -1180,26 +1180,31 @@ function renderSignalChart(rows = []) {
     const chart = initChart("signalChart");
     if (!chart) return;
     const counts = rows.reduce((acc, row) => {
-        const signal = String(row.predicted_signal || "WATCH").toUpperCase();
+        const signal = String(row.alert_signal || row.predicted_signal || "WATCH").toUpperCase();
         acc[signal] = (acc[signal] || 0) + num(row.prediction_count);
         return acc;
     }, {});
-    const centerText = `观望 ${formatNumber(counts.WATCH || 0, 0)}\n看多 ${formatNumber(counts.UP || 0, 0)} / 看空 ${formatNumber(counts.DOWN || 0, 0)}`;
+    const signalColors = { UP: "#f0a500", DOWN: "#00C896", WATCH: "#FF4D4D" };
+    const chartData = ["UP", "DOWN", "WATCH"].map(signal => ({
+        name: labels[signal] || signal,
+        value: counts[signal] || 0,
+        itemStyle: { color: signalColors[signal] }
+    }));
+    const centerText = `保守信号\n观望 ${formatNumber(counts.WATCH || 0, 0)}\n看多 ${formatNumber(counts.UP || 0, 0)} / 看空 ${formatNumber(counts.DOWN || 0, 0)}`;
     chart.setOption({
-        tooltip: { trigger: "item" },
+        tooltip: { trigger: "item", formatter: "{b}: {c}只 ({d}%)<br/>已按告警置信度过滤" },
         legend: { bottom: 0, textStyle: { color: "#66736a" } },
         graphic: [{
             type: "text",
             left: "center",
-            top: "39%",
+            top: "36%",
             style: { text: centerText, textAlign: "center", fill: "#2c2a27", fontSize: 12, lineHeight: 18, fontWeight: 600 }
         }],
         series: [{
             type: "pie",
             radius: ["52%", "74%"],
             center: ["50%", "44%"],
-            data: rows.map(row => ({ name: labels[row.predicted_signal] || row.predicted_signal, value: row.prediction_count })),
-            color: ["#f0a500", "#00C896", "#FF4D4D"]
+            data: chartData
         }]
     });
 }
