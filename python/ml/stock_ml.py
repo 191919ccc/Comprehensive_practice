@@ -1,4 +1,4 @@
-"""Machine-learning feature engineering, training, prediction and persistence.
+﻿"""Machine-learning feature engineering, training, prediction and persistence.
 
 The module supports two data granularities:
 - daily bars through `python -m python.ml.train_daily_predict`
@@ -58,11 +58,18 @@ SEQUENCE_FEATURES = [
     "ma_10_gap",
     "ma_20_gap",
     "volume_ratio",
+    "volume_ratio_20_raw",
     "turnover_ratio",
     "volatility_5",
     "volatility_10",
     "volatility_20",
     "high_low_range",
+    "price_vs_ma20",
+    "relative_sector_change_pct",
+    "relative_market_change_pct",
+    "current_vs_market_index_return",
+    "relative_sh_index_return_1",
+    "relative_cyb_index_return_1",
     "sector_relative_change",
     "market_relative_change",
     "sector_avg_change_pct",
@@ -86,10 +93,13 @@ SEQUENCE_FEATURES = [
     "index_hs300_return_3",
     "market_index_return_1",
     "market_index_return_3",
+    "market_index_return_5",
     "relative_hs300_return_1",
     "relative_hs300_return_3",
+    "relative_hs300_return_5",
     "relative_market_index_return_1",
     "relative_market_index_return_3",
+    "relative_market_index_return_5",
     "index_up_3d",
     "rsi_14",
     "macd",
@@ -99,6 +109,11 @@ SEQUENCE_FEATURES = [
     "money_flow_ratio",
     "vol_regime",
     "price_position_20",
+    "up_streak_3",
+    "down_streak_3",
+    "volume_spike_20",
+    "volume_up_breakout",
+    "volume_down_breakout",
 ]
 CATEGORICAL_FEATURES = ["symbol", "category", "sector"]
 TABULAR_FEATURES = [*CATEGORICAL_FEATURES, *SEQUENCE_FEATURES]
@@ -107,7 +122,8 @@ TIME_SPLIT_RATIO = 0.8
 MIN_DIRECTION_RETURN = float(settings.ml_direction_threshold)
 PREDICTION_RETURN_SIGNAL_THRESHOLD = max(0.0, float(settings.ml_prediction_return_signal_threshold))
 DIRECTION_FIXED_THRESHOLD: float | None = None
-PREDICTION_HORIZON = 3
+PREDICTION_HORIZON = max(1, int(settings.ml_prediction_horizon))
+PREDICTION_HORIZON_EXPERIMENTS = [1, 3, 5]
 DIRECTION_VOLATILITY_WINDOW = 20
 DIRECTION_THRESHOLD_MULTIPLIER = 1.0
 THRESHOLD_EXPERIMENTS = [0.003, 0.005, 0.01, 0.015, 0.02]
@@ -121,8 +137,7 @@ DIRECTION_LABELS = [DIRECTION_DOWN, DIRECTION_UP, DIRECTION_FLAT]
 DIRECTION_SIGNAL_MAP = {DIRECTION_UP: "UP", DIRECTION_DOWN: "DOWN", DIRECTION_FLAT: "WATCH"}
 TRAINING_PROGRESS_INTERVAL_SECONDS = 30.0
 BASELINE_GUARD_LIFT_FLOOR = -0.02
-# 参数搜索后的生产配置。训练入口默认按模型分别使用自己的 direction_threshold，
-# 避免用一个全局阈值同时约束 LightGBM、LSTM 和随机森林。
+# Production defaults from the latest parameter search.
 OPTIMAL_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "random_forest": {
         "direction_threshold": 0.015,
@@ -158,10 +173,13 @@ OPTIMAL_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
 INDEX_FEATURE_COLUMNS = [
     "index_sh_return_1",
     "index_sh_return_3",
+    "index_sh_return_5",
     "index_cyb_return_1",
     "index_cyb_return_3",
+    "index_cyb_return_5",
     "index_hs300_return_1",
     "index_hs300_return_3",
+    "index_hs300_return_5",
 ]
 INDEX_SYMBOL_FEATURE_PREFIX = {
     "INDEX_SH000001": "index_sh",
@@ -466,7 +484,7 @@ class ModelResult:
 
 
 def model_dir() -> Path:
-    """模型文件输出目录，训练后的 joblib/pt 文件会保存在这里。"""
+    """Internal ML pipeline helper."""
     path = Path(__file__).resolve().parents[1] / settings.ml_model_dir
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -552,9 +570,10 @@ def build_index_feature_frame(index_df: pd.DataFrame | None) -> pd.DataFrame:
     grouped = frame.groupby("symbol", group_keys=False)
     frame["index_return_1"] = grouped["last_price"].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
     frame["index_return_3"] = grouped["last_price"].pct_change(3).replace([np.inf, -np.inf], 0).fillna(0)
+    frame["index_return_5"] = grouped["last_price"].pct_change(5).replace([np.inf, -np.inf], 0).fillna(0)
     parts: list[pd.DataFrame] = []
     for symbol, prefix in INDEX_SYMBOL_FEATURE_PREFIX.items():
-        selected = frame[frame["symbol"] == symbol][["trade_date", "index_return_1", "index_return_3"]].copy()
+        selected = frame[frame["symbol"] == symbol][["trade_date", "index_return_1", "index_return_3", "index_return_5"]].copy()
         if selected.empty:
             continue
         selected = selected.groupby("trade_date", as_index=False).last()
@@ -562,6 +581,7 @@ def build_index_feature_frame(index_df: pd.DataFrame | None) -> pd.DataFrame:
             columns={
                 "index_return_1": f"{prefix}_return_1",
                 "index_return_3": f"{prefix}_return_3",
+                "index_return_5": f"{prefix}_return_5",
             }
         )
         parts.append(selected)
@@ -613,9 +633,11 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sorted_df["ma_5_gap"] = np.where(ma_5.abs() > 1e-8, (sorted_df["last_price"] - ma_5) / ma_5, 0)
     sorted_df["ma_10_gap"] = np.where(ma_10.abs() > 1e-8, (sorted_df["last_price"] - ma_10) / ma_10, 0)
     sorted_df["ma_20_gap"] = np.where(ma_20.abs() > 1e-8, (sorted_df["last_price"] - ma_20) / ma_20, 0)
+    sorted_df["price_vs_ma20"] = sorted_df["ma_20_gap"]
     volume_ma20 = grouped["volume"].transform(lambda item: item.rolling(20, min_periods=5).mean())
     turnover_ma20 = grouped["turnover"].transform(lambda item: item.rolling(20, min_periods=5).mean())
-    sorted_df["volume_ratio"] = np.where(volume_ma20.abs() > 1e-8, sorted_df["volume"] / volume_ma20 - 1, 0)
+    sorted_df["volume_ratio_20_raw"] = np.where(volume_ma20.abs() > 1e-8, sorted_df["volume"] / volume_ma20, 1)
+    sorted_df["volume_ratio"] = sorted_df["volume_ratio_20_raw"] - 1
     sorted_df["turnover_ratio"] = np.where(turnover_ma20.abs() > 1e-8, sorted_df["turnover"] / turnover_ma20 - 1, 0)
     sorted_df["volatility_5"] = grouped["return_1"].transform(lambda item: item.rolling(5, min_periods=2).std()).fillna(0)
     sorted_df["volatility_10"] = grouped["return_1"].transform(lambda item: item.rolling(10, min_periods=3).std()).fillna(0)
@@ -628,9 +650,11 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sector_avg_change = sorted_df.groupby(["sector", "event_time"])["change_pct"].transform("mean")
     sorted_df["sector_avg_change_pct"] = sector_avg_change.fillna(0) / 100.0
     sorted_df["sector_relative_change"] = (sorted_df["change_pct"] - sector_avg_change).fillna(0) / 100.0
+    sorted_df["relative_sector_change_pct"] = sorted_df["sector_relative_change"]
     market_avg_change = sorted_df.groupby(["market", "event_time"])["change_pct"].transform("mean")
     sorted_df["market_avg_change_pct"] = market_avg_change.fillna(0) / 100.0
     sorted_df["market_relative_change"] = (sorted_df["change_pct"] - market_avg_change).fillna(0) / 100.0
+    sorted_df["relative_market_change_pct"] = sorted_df["market_relative_change"]
     sorted_df["market_up_ratio"] = sorted_df.groupby(["market", "event_time"])["change_pct"].transform(lambda item: (item > 0).mean()).fillna(0.5) - 0.5
     sorted_df["sector_up_ratio"] = sorted_df.groupby(["sector", "event_time"])["change_pct"].transform(lambda item: (item > 0).mean()).fillna(0.5) - 0.5
     sorted_df["sector_return_1"] = sorted_df.groupby(["sector", "event_time"])["return_1"].transform("mean").fillna(0)
@@ -659,10 +683,20 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
         [sorted_df["index_sh_return_3"], sorted_df["index_cyb_return_3"]],
         default=sorted_df["index_hs300_return_3"],
     )
+    sorted_df["market_index_return_5"] = np.select(
+        [sorted_df["market"] == "SH", is_chinext],
+        [sorted_df["index_sh_return_5"], sorted_df["index_cyb_return_5"]],
+        default=sorted_df["index_hs300_return_5"],
+    )
+    sorted_df["current_vs_market_index_return"] = (sorted_df["change_pct_scaled"] - sorted_df["market_index_return_1"]).fillna(0)
+    sorted_df["relative_sh_index_return_1"] = (sorted_df["return_1"] - sorted_df["index_sh_return_1"]).fillna(0)
+    sorted_df["relative_cyb_index_return_1"] = (sorted_df["return_1"] - sorted_df["index_cyb_return_1"]).fillna(0)
     sorted_df["relative_hs300_return_1"] = (sorted_df["return_1"] - sorted_df["index_hs300_return_1"]).fillna(0)
     sorted_df["relative_hs300_return_3"] = (sorted_df["return_3"] - sorted_df["index_hs300_return_3"]).fillna(0)
+    sorted_df["relative_hs300_return_5"] = (sorted_df["momentum_5"] - sorted_df["index_hs300_return_5"]).fillna(0)
     sorted_df["relative_market_index_return_1"] = (sorted_df["return_1"] - sorted_df["market_index_return_1"]).fillna(0)
     sorted_df["relative_market_index_return_3"] = (sorted_df["return_3"] - sorted_df["market_index_return_3"]).fillna(0)
+    sorted_df["relative_market_index_return_5"] = (sorted_df["momentum_5"] - sorted_df["market_index_return_5"]).fillna(0)
     grouped = sorted_df.groupby("symbol", group_keys=False)
     sorted_df["index_up_3d"] = grouped["market_index_return_1"].transform(lambda item: (item.rolling(3, min_periods=1).sum() > 0).astype(float))
     delta = grouped["last_price"].diff().fillna(0)
@@ -692,6 +726,13 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
         0,
     )
     sorted_df["vol_regime"] = (sorted_df["volatility_5"] > sorted_df["volatility_20"].replace(0, np.nan)).astype(float).fillna(0)
+    positive_return = (sorted_df["return_1"] > 0).astype(float)
+    negative_return = (sorted_df["return_1"] < 0).astype(float)
+    sorted_df["up_streak_3"] = positive_return.groupby(sorted_df["symbol"]).transform(lambda item: item.rolling(3, min_periods=3).sum()).fillna(0) / 3.0
+    sorted_df["down_streak_3"] = negative_return.groupby(sorted_df["symbol"]).transform(lambda item: item.rolling(3, min_periods=3).sum()).fillna(0) / 3.0
+    sorted_df["volume_spike_20"] = (sorted_df["volume_ratio_20_raw"] >= 2.0).astype(float)
+    sorted_df["volume_up_breakout"] = ((sorted_df["return_1"] > 0) & (sorted_df["volume_ratio_20_raw"] >= 1.5)).astype(float)
+    sorted_df["volume_down_breakout"] = ((sorted_df["return_1"] < 0) & (sorted_df["volume_ratio_20_raw"] >= 1.5)).astype(float)
     sorted_df["volume_price_corr"] = 0.0
     for _, index in sorted_df.groupby("symbol", sort=False).groups.items():
         group = sorted_df.loc[index]
@@ -741,18 +782,18 @@ def prepare_dataset(
     df: pd.DataFrame,
     index_df: pd.DataFrame | None = None,
     direction_threshold: float | None = None,
+    prediction_horizon: int | None = None,
 ) -> pd.DataFrame:
     """Build supervised-learning labels from sorted price rows.
 
-    For each symbol, `next_price` is shifted by `PREDICTION_HORIZON`.
-    With daily bars this means T+3 trading days. With real-time ticks this
+    For each symbol, `next_price` is shifted by the selected prediction horizon.
+    With daily bars this means T+N trading days. With real-time ticks this
     means the third future stored tick for the same symbol, not necessarily
     exactly three wall-clock minutes.
     """
-    # 数据准备顺序不能随意调换：先选单一数据源、去掉重复价格，再计算技术指标和未来标签。
-    # 如果先做 shift 再清洗重复点，会把重复行情当成真实未来走势，导致 WATCH 标签过多。
+    horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
     sorted_df = add_technical_features(collapse_repeated_price_ticks(select_training_sources(df)), index_df)
-    sorted_df["next_price"] = sorted_df.groupby("symbol")["last_price"].shift(-PREDICTION_HORIZON)
+    sorted_df["next_price"] = sorted_df.groupby("symbol")["last_price"].shift(-horizon)
     sorted_df["next_return"] = np.where(
         sorted_df["last_price"].abs() > 1e-8,
         (sorted_df["next_price"] - sorted_df["last_price"]) / sorted_df["last_price"],
@@ -778,6 +819,7 @@ def prepare_dataset(
     sorted_df = sorted_df.dropna(subset=["next_price"])
     sorted_df["next_direction"] = sorted_df["next_direction"].astype(int)
     sorted_df.attrs["direction_threshold"] = float(sorted_df["direction_threshold"].iloc[0]) if not sorted_df.empty else None
+    sorted_df.attrs["prediction_horizon"] = horizon
     return sorted_df
 
 
@@ -785,26 +827,29 @@ def prepare_model_datasets(
     df: pd.DataFrame,
     index_df: pd.DataFrame | None = None,
     model_names: set[str] | None = None,
+    prediction_horizon: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Prepare per-model training datasets using the selected best thresholds."""
     datasets: dict[str, pd.DataFrame] = {}
-    dataset_by_threshold: dict[float, pd.DataFrame] = {}
-    # 多个模型可能共用同一个阈值，按阈值缓存数据集，避免重复做特征工程和样本裁剪。
+    dataset_by_key: dict[tuple[float, int], pd.DataFrame] = {}
+    horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
     for model_name, config in OPTIMAL_MODEL_CONFIGS.items():
         if model_names is not None and model_name not in model_names:
             continue
         threshold = float(config["direction_threshold"])
-        if threshold not in dataset_by_threshold:
-            prepared = prepare_dataset(df, index_df, direction_threshold=threshold)
+        key = (threshold, horizon)
+        if key not in dataset_by_key:
+            prepared = prepare_dataset(df, index_df, direction_threshold=threshold, prediction_horizon=horizon)
             before_limit = len(prepared)
             limited = limit_training_dataset(prepared)
             limited.attrs["direction_threshold"] = threshold
+            limited.attrs["prediction_horizon"] = horizon
             print(
-                f"[ml] prepared threshold={threshold:g} rows {before_limit} -> {len(limited)}, symbols={limited['symbol'].nunique() if not limited.empty else 0}",
+                f"[ml] prepared horizon={horizon} threshold={threshold:g} rows {before_limit} -> {len(limited)}, symbols={limited['symbol'].nunique() if not limited.empty else 0}",
                 flush=True,
             )
-            dataset_by_threshold[threshold] = limited
-        datasets[model_name] = dataset_by_threshold[threshold]
+            dataset_by_key[key] = limited
+        datasets[model_name] = dataset_by_key[key]
     return datasets
 
 
@@ -837,6 +882,38 @@ def threshold_experiment_metrics(dataset: pd.DataFrame) -> list[tuple[str, str, 
     return metrics
 
 
+def horizon_experiment_metrics(
+    df: pd.DataFrame,
+    index_df: pd.DataFrame | None,
+    direction_threshold: float,
+    horizons: list[int] | tuple[int, ...] | None = None,
+) -> list[tuple[str, str, float]]:
+    """Compare label balance for T+1/T+3/T+5 style daily targets."""
+    metrics: list[tuple[str, str, float]] = []
+    selected_horizons = horizons or PREDICTION_HORIZON_EXPERIMENTS
+    for horizon in selected_horizons:
+        horizon_value = max(1, int(horizon))
+        dataset = prepare_dataset(df, index_df, direction_threshold=direction_threshold, prediction_horizon=horizon_value)
+        if dataset.empty or "next_direction" not in dataset.columns:
+            continue
+        labels = dataset["next_direction"].astype(int).to_numpy()
+        counts = np.bincount(labels, minlength=len(DIRECTION_LABELS)).astype(float)
+        total = float(counts.sum())
+        tag = f"h{horizon_value}"
+        metrics.extend(
+            [
+                ("horizon_experiment", f"{tag}_prediction_horizon", float(horizon_value)),
+                ("horizon_experiment", f"{tag}_samples", total),
+                ("horizon_experiment", f"{tag}_symbols", float(dataset["symbol"].nunique() if "symbol" in dataset.columns else 0)),
+                ("horizon_experiment", f"{tag}_down_ratio", counts[DIRECTION_DOWN] / total if total else 0.0),
+                ("horizon_experiment", f"{tag}_up_ratio", counts[DIRECTION_UP] / total if total else 0.0),
+                ("horizon_experiment", f"{tag}_watch_ratio", counts[DIRECTION_FLAT] / total if total else 0.0),
+                ("horizon_experiment", f"{tag}_majority_baseline_accuracy", counts.max() / total if total else 0.0),
+            ]
+        )
+    return metrics
+
+
 def dataset_direction_threshold(dataset: pd.DataFrame, model_name: str | None = None) -> float:
     threshold = dataset.attrs.get("direction_threshold") if hasattr(dataset, "attrs") else None
     if threshold is None and model_name in OPTIMAL_MODEL_CONFIGS:
@@ -844,6 +921,11 @@ def dataset_direction_threshold(dataset: pd.DataFrame, model_name: str | None = 
     if threshold is None:
         threshold = DIRECTION_FIXED_THRESHOLD if DIRECTION_FIXED_THRESHOLD is not None else MIN_DIRECTION_RETURN
     return float(threshold)
+
+
+def dataset_prediction_horizon(dataset: pd.DataFrame) -> int:
+    horizon = dataset.attrs.get("prediction_horizon") if hasattr(dataset, "attrs") else None
+    return max(1, int(horizon if horizon is not None else PREDICTION_HORIZON))
 
 
 def limit_training_dataset(dataset: pd.DataFrame) -> pd.DataFrame:
@@ -880,7 +962,7 @@ def tabular_category_values(dataset: pd.DataFrame) -> list[list[str]]:
 
 
 def build_preprocessor(category_values: list[list[str]] | None = None) -> ColumnTransformer:
-    """把股票代码、分类、行业等类别字段转换成模型可使用的表格特征。"""
+    """Internal ML pipeline helper."""
     encoder = OneHotEncoder(handle_unknown="ignore", categories=category_values) if category_values else OneHotEncoder(handle_unknown="ignore")
     return ColumnTransformer(
         transformers=[
@@ -1013,7 +1095,8 @@ def train_tabular_models(
     log_stages: bool = False,
 ) -> ModelResult:
     direction_threshold = dataset_direction_threshold(dataset, name)
-    """训练一组表格模型，随机森林和 LightGBM 都复用这套流程。"""
+    prediction_horizon = dataset_prediction_horizon(dataset)
+    """Internal ML pipeline helper."""
     sorted_dataset = dataset.sort_values(["symbol", "event_time"]).reset_index(drop=True)
     category_values = tabular_category_values(sorted_dataset)
     train_df, test_df = time_split_dataframe_by_symbol(sorted_dataset)
@@ -1099,6 +1182,7 @@ def train_tabular_models(
             if key in decision_params:
                 decision_metrics[f"{name}_{key}"] = float(decision_params[key])
     decision_metrics[f"{name}_direction_threshold"] = direction_threshold
+    decision_metrics[f"{name}_prediction_horizon"] = float(prediction_horizon)
     alert_metrics = alert_backtest_metrics(
         name,
         y_return_test,
@@ -1124,16 +1208,19 @@ def train_tabular_models(
         price_model=price_model,
         direction_model=direction_model,
         metrics={f"{name}_return_mae": mae, **direction_metrics, **guarded_direction_metrics, **alert_metrics, **walk_forward_metrics, **decision_metrics},
-        extra={"decision_params": decision_params or {"mode": "argmax"}, "direction_threshold": direction_threshold},
+        extra={
+            "decision_params": decision_params or {"mode": "argmax"},
+            "direction_threshold": direction_threshold,
+            "prediction_horizon": prediction_horizon,
+        },
     )
 
 
 def train_random_forest(dataset: pd.DataFrame) -> ModelResult:
-    """随机森林作为基础模型，稳定、依赖少，适合兜底。"""
+    """Internal ML pipeline helper."""
     config = OPTIMAL_MODEL_CONFIGS["random_forest"]
     rf_n_jobs = int(settings.ml_rf_n_jobs)
     print(f"[ml] random_forest n_jobs={rf_n_jobs}", flush=True)
-    # 随机森林训练成本主要来自树数量、校准和 walk-forward；是否完整评估由环境变量控制。
     base_classifier = RandomForestClassifier(
         n_estimators=int(config["n_estimators_cls"]),
         max_depth=int(config["max_depth"]),
@@ -1171,8 +1258,7 @@ def train_random_forest(dataset: pd.DataFrame) -> ModelResult:
 
 
 def train_lightgbm(dataset: pd.DataFrame) -> ModelResult:
-    """LightGBM 适合结构化表格数据，通常比随机森林更强。"""
-    # LightGBM 是当前生产主力模型，适合本项目这种结构化日线特征，并且训练速度明显快于 RF。
+    """Internal ML pipeline helper."""
     try:
         from lightgbm import LGBMClassifier, LGBMRegressor
     except ImportError as exc:
@@ -1214,7 +1300,7 @@ def train_lightgbm(dataset: pd.DataFrame) -> ModelResult:
 
 
 def build_lstm_samples(dataset: pd.DataFrame, window_size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """把每只股票连续 N 条行情切成 LSTM 训练序列。"""
+    """Internal ML pipeline helper."""
     sequence_df = dataset[["symbol", "event_time", "next_return", "next_direction", *SEQUENCE_FEATURES]].copy()
 
     x_values: list[np.ndarray] = []
@@ -1397,7 +1483,8 @@ def walk_forward_lstm_direction_metrics(dataset: pd.DataFrame, device: torch.dev
 
 def train_lstm(dataset: pd.DataFrame) -> ModelResult:
     direction_threshold = dataset_direction_threshold(dataset, "lstm")
-    """LSTM 使用连续行情序列建模，适合有足够历史数据后的时间序列预测。"""
+    prediction_horizon = dataset_prediction_horizon(dataset)
+    """Internal ML pipeline helper."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if settings.ml_require_gpu and device.type != "cuda":
         raise RuntimeError("ML_REQUIRE_GPU=true, but PyTorch cannot see any CUDA GPU.")
@@ -1603,6 +1690,7 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             if key in decision_params:
                 decision_metrics[f"lstm_{key}"] = float(decision_params[key])
     decision_metrics["lstm_direction_threshold"] = direction_threshold
+    decision_metrics["lstm_prediction_horizon"] = float(prediction_horizon)
     alert_metrics = alert_backtest_metrics(
         "lstm",
         y_return_test,
@@ -1638,18 +1726,18 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             "device": str(device),
             "decision_params": decision_params or {"mode": "argmax"},
             "direction_threshold": direction_threshold,
+            "prediction_horizon": prediction_horizon,
         },
     )
 
 
 def train_models(dataset: pd.DataFrame | dict[str, pd.DataFrame], model_names: set[str] | None = None) -> list[ModelResult]:
-    """同时训练随机森林、LightGBM、LSTM；可选依赖缺失时自动跳过。"""
+    """Internal ML pipeline helper."""
     def dataset_for(model_name: str) -> pd.DataFrame:
         if isinstance(dataset, dict):
             return dataset[model_name]
         return dataset
 
-    # 固定训练顺序让日志和指标更容易比较；命令行 --models 决定实际参与训练的模型集合。
     training_order = ("random_forest", "lightgbm", "lstm")
     selected_models = [name for name in training_order if model_names is None or name in model_names]
     if not selected_models:
@@ -1664,17 +1752,21 @@ def train_models(dataset: pd.DataFrame | dict[str, pd.DataFrame], model_names: s
 
     results: list[ModelResult] = []
     if "random_forest" in selected_models:
+        rf_dataset = dataset_for("random_forest")
         print(
-            f"[ml] training random_forest direction_threshold={dataset_direction_threshold(dataset_for('random_forest'), 'random_forest'):g}",
+            f"[ml] training random_forest horizon={dataset_prediction_horizon(rf_dataset)} direction_threshold={dataset_direction_threshold(rf_dataset, 'random_forest'):g}",
             flush=True,
         )
-        results.append(train_random_forest(dataset_for("random_forest")))
+        results.append(train_random_forest(rf_dataset))
     for model_name, trainer in (("lightgbm", train_lightgbm), ("lstm", train_lstm)):
         if model_name not in selected_models:
             continue
         try:
             model_dataset = dataset_for(model_name)
-            print(f"[ml] training {model_name} direction_threshold={dataset_direction_threshold(model_dataset, model_name):g}", flush=True)
+            print(
+                f"[ml] training {model_name} horizon={dataset_prediction_horizon(model_dataset)} direction_threshold={dataset_direction_threshold(model_dataset, model_name):g}",
+                flush=True,
+            )
             results.append(trainer(model_dataset))
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] {exc}", flush=True)
@@ -1742,7 +1834,7 @@ def select_best_model(results: list[ModelResult]) -> ModelResult:
 
 
 def save_models(results: list[ModelResult], version: str) -> None:
-    """按版本号保存所有成功训练的模型。"""
+    """Internal ML pipeline helper."""
     out_dir = model_dir()
     for result in results:
         if result.model_type == "sequence":
@@ -1969,9 +2061,8 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
     result = frame.copy()
     if "predicted_signal" not in result.columns or "confidence" not in result.columns:
         return result
-    # predicted_signal 保留真实模型方向，写入 ml_prediction_history 供漂移检测；
-    # alert_signal 才是经过置信度和收益幅度过滤后的保守告警信号。
-    result["alert_signal"] = result["predicted_signal"]
+    # predicted_signal 淇濈暀鐪熷疄妯″瀷鏂瑰悜锛屽啓鍏?ml_prediction_history 渚涙紓绉绘娴嬶紱
+    # alert_signal 鎵嶆槸缁忚繃缃俊搴﹀拰鏀剁泭骞呭害杩囨护鍚庣殑淇濆畧鍛婅淇″彿銆?    result["alert_signal"] = result["predicted_signal"]
     if "predicted_direction" in result.columns:
         result["alert_direction"] = result["predicted_direction"]
     up_threshold = float(settings.ml_alert_up_confidence_threshold)
@@ -2025,7 +2116,7 @@ def predict_latest_tabular(df: pd.DataFrame, model_result: ModelResult, version:
 
 
 def predict_latest_lstm(df: pd.DataFrame, model_result: ModelResult, version: str, index_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """用每只股票最近 N 条行情生成 LSTM 预测输入。"""
+    """Internal ML pipeline helper."""
     if model_result.extra is None:
         raise ValueError("LSTM model extra metadata is missing.")
 
@@ -2071,7 +2162,7 @@ def predict_latest_lstm(df: pd.DataFrame, model_result: ModelResult, version: st
 
 
 def predict_latest(df: pd.DataFrame, model_result: ModelResult, version: str, index_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """用最佳模型对每只股票的最新行情做下一时刻价格和方向预测。"""
+    """Internal ML pipeline helper."""
     if model_result.model_type == "sequence":
         return predict_latest_lstm(df, model_result, version, index_df)
     return predict_latest_tabular(df, model_result, version, index_df)
@@ -2124,8 +2215,7 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
         fallback_results = [result for result in results if result.name != "random_forest"] or results
         return predict_latest(df, select_best_model(fallback_results), version, index_df)
 
-    # 各模型先独立预测，再按 walk-forward/balanced/F1 等稳健指标动态加权，而不是简单平均。
-    weighted_predictions: list[tuple[str, float, pd.DataFrame]] = []
+    # 鍚勬ā鍨嬪厛鐙珛棰勬祴锛屽啀鎸?walk-forward/balanced/F1 绛夌ǔ鍋ユ寚鏍囧姩鎬佸姞鏉冿紝鑰屼笉鏄畝鍗曞钩鍧囥€?    weighted_predictions: list[tuple[str, float, pd.DataFrame]] = []
     for result in candidates:
         prediction = predict_latest_lstm(df, result, version, index_df) if result.model_type == "sequence" else predict_latest_tabular(df, result, version, index_df)
         weighted_predictions.append((result.name, ensemble_weight_score(result), prediction))
@@ -2177,7 +2267,7 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
 
 
 def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tuple[str, str, float]]:
-    """整理所有模型的指标，写入 MySQL 后可在前端或报告中对比。"""
+    """Internal ML pipeline helper."""
     metrics: list[tuple[str, str, float]] = []
     for result in results:
         for metric_name, metric_value in result.metrics.items():
@@ -2191,14 +2281,13 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
             for model_name, weight in raw_weights.items():
                 metrics.append(("ensemble", f"{model_name}_weight", float(weight / total_weight)))
     metrics.append(("prediction", "return_signal_override_threshold", float(PREDICTION_RETURN_SIGNAL_THRESHOLD)))
+    metrics.append(("prediction", "prediction_horizon", float(PREDICTION_HORIZON)))
     metrics.append(("selection", "best_model_code", float({"random_forest": 1, "lightgbm": 2, "lstm": 3}.get(best_model_name, 0))))
     return metrics
 
 
 def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float]], version: str, update_metrics: bool = True) -> None:
-    """把最佳模型预测结果和全部模型指标写入 MySQL，供前端展示。"""
-    # ml_predictions 保存最新截面，ml_prediction_history 保存历史轨迹；
-    # 两张表都保留 predicted_signal 和 alert_signal，便于区分模型评估和告警展示口径。
+    """Internal ML pipeline helper."""
     conn = pymysql.connect(
         host=settings.mysql_host,
         port=settings.mysql_port,
@@ -2213,23 +2302,23 @@ def write_results(predictions: pd.DataFrame, metrics: list[tuple[str, str, float
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ml_prediction_history (
-                    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '预测历史主键ID',
-                    symbol VARCHAR(32) NOT NULL COMMENT '股票代码',
-                    company_name VARCHAR(255) NOT NULL COMMENT '公司名称',
-                    category VARCHAR(64) NOT NULL COMMENT '股票池分类',
-                    sector VARCHAR(64) NOT NULL COMMENT '行业分类',
-                    current_price DECIMAL(18, 2) NOT NULL COMMENT '预测发生时的当前价格',
-                    predicted_next_price DECIMAL(18, 2) NOT NULL COMMENT '预测下一时刻价格',
-                    predicted_signal VARCHAR(16) NOT NULL COMMENT '模型原始预测方向信号，例如 UP、DOWN、WATCH',
-                    alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '经过置信度过滤后的告警侧信号',
-                    confidence DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '预测置信度，范围0到1',
-                    model_version VARCHAR(64) NOT NULL COMMENT '模型版本号',
-                    predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '预测生成时间',
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '棰勬祴鍘嗗彶涓婚敭ID',
+                    symbol VARCHAR(32) NOT NULL COMMENT '鑲＄エ浠ｇ爜',
+                    company_name VARCHAR(255) NOT NULL COMMENT '鍏徃鍚嶇О',
+                    category VARCHAR(64) NOT NULL COMMENT '鑲＄エ姹犲垎绫?,
+                    sector VARCHAR(64) NOT NULL COMMENT '琛屼笟鍒嗙被',
+                    current_price DECIMAL(18, 2) NOT NULL COMMENT '棰勬祴鍙戠敓鏃剁殑褰撳墠浠锋牸',
+                    predicted_next_price DECIMAL(18, 2) NOT NULL COMMENT '棰勬祴涓嬩竴鏃跺埢浠锋牸',
+                    predicted_signal VARCHAR(16) NOT NULL COMMENT '妯″瀷鍘熷棰勬祴鏂瑰悜淇″彿锛屼緥濡?UP銆丏OWN銆乄ATCH',
+                    alert_signal VARCHAR(16) NOT NULL DEFAULT 'WATCH' COMMENT '缁忚繃缃俊搴﹁繃婊ゅ悗鐨勫憡璀︿晶淇″彿',
+                    confidence DECIMAL(8, 4) NOT NULL DEFAULT 0 COMMENT '棰勬祴缃俊搴︼紝鑼冨洿0鍒?',
+                    model_version VARCHAR(64) NOT NULL COMMENT '妯″瀷鐗堟湰鍙?,
+                    predicted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '棰勬祴鐢熸垚鏃堕棿',
                     KEY idx_ml_prediction_history_symbol_time (symbol, predicted_at),
                     KEY idx_ml_prediction_history_model_time (model_version, predicted_at),
                     KEY idx_ml_prediction_history_signal_time (predicted_signal, predicted_at),
                     KEY idx_ml_prediction_history_alert_signal_time (alert_signal, predicted_at)
-                ) COMMENT='机器学习预测历史表，用于模型漂移检测'
+                ) COMMENT='鏈哄櫒瀛︿範棰勬祴鍘嗗彶琛紝鐢ㄤ簬妯″瀷婕傜Щ妫€娴?
                 """
             )
             for table_name in ("ml_predictions", "ml_prediction_history"):

@@ -30,6 +30,14 @@ def parse_float_list(value: str) -> list[float]:
     return [float(item.strip()) for item in value.split(",") if item.strip()]
 
 
+def parse_int_list(value: str) -> list[int]:
+    items = [int(item.strip()) for item in value.split(",") if item.strip()]
+    invalid = [item for item in items if item <= 0]
+    if invalid:
+        raise SystemExit(f"[tune] horizons must be positive integers: {invalid}")
+    return items
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run grouped daily parameter tests with baseline-gated scoring.")
     parser.add_argument("--models", default="random_forest,lightgbm,lstm", help="Comma-separated model families: random_forest,lightgbm,lstm")
@@ -39,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lstm-patience", type=int, default=5, help="LSTM early-stop patience during tuning.")
     parser.add_argument("--direction-threshold", type=float, default=0.015, help="Fixed direction threshold for daily labels.")
     parser.add_argument("--direction-thresholds", default="", help="Optional comma-separated thresholds, for example 0.01,0.015,0.02.")
+    parser.add_argument("--horizons", default="1,3,5", help="Comma-separated prediction horizons to test, for example 1,3,5.")
     parser.add_argument("--out-dir", default="reports/ml_tuning", help="Output directory for CSV reports.")
     return parser.parse_args()
 
@@ -407,55 +416,66 @@ def run_lstm_group(dataset: pd.DataFrame, group: dict[str, Any]) -> dict[str, An
 def main() -> None:
     args = parse_args()
     selected_models = {item.strip().lower() for item in args.models.split(",") if item.strip()}
-    stock_ml.PREDICTION_HORIZON = 3
     thresholds = parse_float_list(args.direction_thresholds) if args.direction_thresholds else [args.direction_threshold]
+    horizons = parse_int_list(args.horizons)
 
     with stage("load daily bars"):
         ticks = load_price_ticks(source="akshare_cold_start")
         index_ticks = load_price_ticks(source="akshare_index")
 
     rows: list[dict[str, Any]] = []
-    dataset_info_by_threshold: dict[float, tuple[int, int]] = {}
-    for threshold in thresholds:
-        stock_ml.MIN_DIRECTION_RETURN = threshold
-        stock_ml.DIRECTION_FIXED_THRESHOLD = threshold
-        with stage(f"prepare dataset threshold={threshold:g}"):
-            dataset = prepare_dataset(ticks, index_ticks)
-            dataset = cap_dataset(dataset, args.max_rows)
-        dataset_rows = len(dataset)
-        symbols = int(dataset["symbol"].nunique()) if not dataset.empty and "symbol" in dataset.columns else 0
-        dataset_info_by_threshold[threshold] = (dataset_rows, symbols)
-        print(f"[tune] threshold={threshold:g} dataset rows={dataset_rows}, symbols={symbols}", flush=True)
+    dataset_info_by_target: dict[str, tuple[int, int]] = {}
+    for horizon in horizons:
+        stock_ml.PREDICTION_HORIZON = horizon
+        for threshold in thresholds:
+            stock_ml.MIN_DIRECTION_RETURN = threshold
+            stock_ml.DIRECTION_FIXED_THRESHOLD = threshold
+            target_key = f"h{horizon}_thr{threshold:g}"
+            with stage(f"prepare dataset horizon={horizon} threshold={threshold:g}"):
+                dataset = prepare_dataset(ticks, index_ticks, direction_threshold=threshold, prediction_horizon=horizon)
+                dataset = cap_dataset(dataset, args.max_rows)
+                dataset.attrs["prediction_horizon"] = horizon
+                dataset.attrs["direction_threshold"] = threshold
+            dataset_rows = len(dataset)
+            symbols = int(dataset["symbol"].nunique()) if not dataset.empty and "symbol" in dataset.columns else 0
+            dataset_info_by_target[target_key] = (dataset_rows, symbols)
+            print(f"[tune] horizon={horizon} threshold={threshold:g} dataset rows={dataset_rows}, symbols={symbols}", flush=True)
 
-        def add_context(group: dict[str, Any]) -> dict[str, Any]:
-            return {**group, "direction_threshold": threshold, "dataset_rows": dataset_rows, "symbols": symbols}
+            def add_context(group: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    **group,
+                    "prediction_horizon": horizon,
+                    "direction_threshold": threshold,
+                    "dataset_rows": dataset_rows,
+                    "symbols": symbols,
+                }
 
-        if "random_forest" in selected_models or "rf" in selected_models:
-            for group in random_forest_groups():
-                group = add_context(group)
-                try:
-                    with stage(f"{group['group']} threshold={threshold:g}"):
-                        rows.append(run_random_forest_group(dataset, group))
-                except Exception as exc:  # noqa: BLE001
-                    rows.append(metric_row(group, "random_forest", {}, 0.0, str(exc)))
+            if "random_forest" in selected_models or "rf" in selected_models:
+                for group in random_forest_groups():
+                    group = add_context(group)
+                    try:
+                        with stage(f"{group['group']} horizon={horizon} threshold={threshold:g}"):
+                            rows.append(run_random_forest_group(dataset, group))
+                    except Exception as exc:  # noqa: BLE001
+                        rows.append(metric_row(group, "random_forest", {}, 0.0, str(exc)))
 
-        if "lightgbm" in selected_models or "lgbm" in selected_models:
-            for group in lgbm_groups():
-                group = add_context(group)
-                try:
-                    with stage(f"{group['group']} threshold={threshold:g}"):
-                        rows.append(run_lightgbm_group(dataset, group))
-                except Exception as exc:  # noqa: BLE001
-                    rows.append(metric_row(group, "lightgbm", {}, 0.0, str(exc)))
+            if "lightgbm" in selected_models or "lgbm" in selected_models:
+                for group in lgbm_groups():
+                    group = add_context(group)
+                    try:
+                        with stage(f"{group['group']} horizon={horizon} threshold={threshold:g}"):
+                            rows.append(run_lightgbm_group(dataset, group))
+                    except Exception as exc:  # noqa: BLE001
+                        rows.append(metric_row(group, "lightgbm", {}, 0.0, str(exc)))
 
-        if "lstm" in selected_models:
-            for group in lstm_groups(args.lstm_epochs, args.lstm_patience, args.lstm_max_sequences):
-                group = add_context(group)
-                try:
-                    with stage(f"{group['group']} threshold={threshold:g}"):
-                        rows.append(run_lstm_group(dataset, group))
-                except Exception as exc:  # noqa: BLE001
-                    rows.append(metric_row(group, "lstm", {}, 0.0, str(exc)))
+            if "lstm" in selected_models:
+                for group in lstm_groups(args.lstm_epochs, args.lstm_patience, args.lstm_max_sequences):
+                    group = add_context(group)
+                    try:
+                        with stage(f"{group['group']} horizon={horizon} threshold={threshold:g}"):
+                            rows.append(run_lstm_group(dataset, group))
+                    except Exception as exc:  # noqa: BLE001
+                        rows.append(metric_row(group, "lstm", {}, 0.0, str(exc)))
 
     report = pd.DataFrame(rows).sort_values(["model", "score"], ascending=[True, False])
     out_dir = Path(args.out_dir)
@@ -468,12 +488,13 @@ def main() -> None:
     summary_lines = [
         "# Daily ML Parameter Tuning Summary",
         "",
+        f"- prediction_horizons: {', '.join(str(item) for item in horizons)}",
         f"- direction_thresholds: {', '.join(str(item) for item in thresholds)}",
-        f"- dataset_by_threshold: {dataset_info_by_threshold}",
+        f"- dataset_by_target: {dataset_info_by_target}",
         f"- report_csv: {out_path.name}",
         "",
-        "| model | selected_group | threshold | final_pass | operational_pass | score | direction_acc | baseline | lift | wf_acc | wf_baseline | wf_lift | guarded_used | wf_guarded_used |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| model | selected_group | horizon | threshold | final_pass | operational_pass | score | direction_acc | baseline | lift | wf_acc | wf_baseline | wf_lift | guarded_used | wf_guarded_used |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     selected_parameter_rows: list[dict[str, Any]] = []
 
@@ -494,9 +515,10 @@ def main() -> None:
                 flush=True,
             )
             summary_lines.append(
-                "| {model} | {group} | {threshold} | {raw_pass} | {op_pass} | {score:.4f} | {acc} | {baseline} | {lift} | {wf_acc} | {wf_base} | {wf_lift} | {guarded_used} | {wf_guarded_used} |".format(
+                "| {model} | {group} | {horizon} | {threshold} | {raw_pass} | {op_pass} | {score:.4f} | {acc} | {baseline} | {lift} | {wf_acc} | {wf_base} | {wf_lift} | {guarded_used} | {wf_guarded_used} |".format(
                     model=model_name,
                     group=row["group"],
+                    horizon=row.get("prediction_horizon", ""),
                     threshold=row.get("direction_threshold", ""),
                     raw_pass=bool(row["passes_baseline"]),
                     op_pass=bool(row["operational_passes_baseline"]),

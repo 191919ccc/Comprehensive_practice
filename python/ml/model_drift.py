@@ -15,7 +15,7 @@ from python.common.config import settings
 from python.ml.daily_bar_store import DAILY_STOCK_TABLE, ensure_daily_bar_tables
 
 DEFAULT_SIGNAL_THRESHOLD = float(settings.ml_direction_threshold)
-DEFAULT_PREDICTION_HORIZON = 3
+DEFAULT_PREDICTION_HORIZON = max(1, int(settings.ml_prediction_horizon))
 
 
 def parse_args() -> argparse.Namespace:

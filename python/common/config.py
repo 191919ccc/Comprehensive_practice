@@ -87,6 +87,8 @@ class Settings:
     ml_rf_n_jobs = int(os.getenv("ML_RF_N_JOBS", "4"))
     ml_training_lookback_days = int(os.getenv("ML_TRAINING_LOOKBACK_DAYS", "1500"))
     ml_direction_threshold = float(os.getenv("ML_DIRECTION_THRESHOLD", "0.015"))
+    ml_prediction_horizon = int(os.getenv("ML_PREDICTION_HORIZON", "3"))
+    ml_horizon_experiments = os.getenv("ML_HORIZON_EXPERIMENTS", "1,3,5")
     ml_prediction_return_signal_threshold = float(os.getenv("ML_PREDICTION_RETURN_SIGNAL_THRESHOLD", "0.003"))
     # 日线训练数据时效阈值。训练入口会在数据过旧时中止，避免前端展示“新预测、旧数据”的状态。
     ml_max_daily_data_age_days = int(os.getenv("ML_MAX_DAILY_DATA_AGE_DAYS", "10"))
