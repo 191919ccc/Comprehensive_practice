@@ -152,6 +152,7 @@ RISK_TARGET_ENABLED = ML_TARGET_MODE == "downside_risk"
 RISK_DOWNSIDE_THRESHOLD = max(0.0, float(settings.ml_risk_downside_threshold))
 RISK_VOLATILITY_THRESHOLD = max(0.0, float(settings.ml_risk_volatility_threshold))
 RISK_ALERT_MIN_RETURN = max(0.0, float(settings.ml_risk_alert_min_return))
+DOWN_ALERT_RISK_SCORE_THRESHOLD = max(0.0, float(settings.ml_down_alert_risk_score_threshold))
 DIRECTION_VOLATILITY_WINDOW = 20
 DIRECTION_THRESHOLD_MULTIPLIER = 1.0
 THRESHOLD_EXPERIMENTS = [0.003, 0.005, 0.01, 0.015, 0.02]
@@ -225,6 +226,17 @@ DIRECTION_METRIC_NAMES = {
     DIRECTION_UP: "up",
     DIRECTION_FLAT: "watch",
 }
+DOWN_RISK_EVIDENCE_COLUMNS = [
+    "return_1",
+    "return_3",
+    "momentum_5",
+    "volume_ratio_20_raw",
+    "volume_down_breakout",
+    "relative_market_index_return_3",
+    "relative_market_index_return_5",
+    "sector_relative_return_5",
+    "current_vs_market_index_return",
+]
 
 
 def direction_eval_metrics(prefix: str, y_true: np.ndarray | pd.Series, y_pred: np.ndarray | pd.Series) -> dict[str, float]:
@@ -268,6 +280,71 @@ def direction_eval_metrics(prefix: str, y_true: np.ndarray | pd.Series, y_pred: 
     metrics[f"{prefix}_risk_precision"] = metrics[f"{prefix}_down_precision"]
     metrics[f"{prefix}_predicted_risk_ratio"] = metrics[f"{prefix}_predicted_down_ratio"]
     return metrics
+
+
+def numeric_series(frame: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(default, index=frame.index, dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(default)
+
+
+def downside_risk_score(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Score whether a DOWN model signal has real weak-price evidence behind it."""
+    if frame.empty:
+        empty = pd.Series(dtype=float, index=frame.index)
+        return empty, pd.Series(dtype=int, index=frame.index)
+
+    prob_down = numeric_series(frame, "prob_down")
+    prob_flat = numeric_series(frame, "prob_flat")
+    return_1 = numeric_series(frame, "return_1")
+    return_3 = numeric_series(frame, "return_3")
+    momentum_5 = numeric_series(frame, "momentum_5")
+    volume_ratio = numeric_series(frame, "volume_ratio_20_raw", 1.0)
+    volume_down_breakout = numeric_series(frame, "volume_down_breakout")
+    relative_market_3 = numeric_series(frame, "relative_market_index_return_3")
+    relative_market_5 = numeric_series(frame, "relative_market_index_return_5")
+    relative_sector_5 = numeric_series(frame, "sector_relative_return_5")
+    current_vs_market = numeric_series(frame, "current_vs_market_index_return")
+
+    probability_score = prob_down.clip(0, 1)
+    margin_score = (prob_down - prob_flat).clip(lower=0, upper=1)
+    recent_weakness = pd.concat(
+        [
+            (-return_1 / 0.015).clip(lower=0, upper=1),
+            (-return_3 / 0.030).clip(lower=0, upper=1),
+            (-momentum_5 / 0.050).clip(lower=0, upper=1),
+        ],
+        axis=1,
+    ).max(axis=1)
+    volume_score = pd.concat(
+        [
+            volume_down_breakout.clip(lower=0, upper=1),
+            (((volume_ratio - 1.0) / 1.0).clip(lower=0, upper=1) * (return_1 < 0).astype(float)),
+        ],
+        axis=1,
+    ).max(axis=1)
+    relative_weakness = pd.concat(
+        [
+            (-relative_market_3 / 0.030).clip(lower=0, upper=1),
+            (-relative_market_5 / 0.050).clip(lower=0, upper=1),
+            (-relative_sector_5 / 0.050).clip(lower=0, upper=1),
+            (-current_vs_market / 0.020).clip(lower=0, upper=1),
+        ],
+        axis=1,
+    ).max(axis=1)
+    evidence_count = (
+        (recent_weakness >= 0.20).astype(int)
+        + (volume_score >= 0.25).astype(int)
+        + (relative_weakness >= 0.20).astype(int)
+    )
+    score = (
+        probability_score * 0.34
+        + margin_score * 0.18
+        + recent_weakness * 0.18
+        + volume_score * 0.12
+        + relative_weakness * 0.18
+    ).clip(0, 1)
+    return score, evidence_count
 
 
 def baseline_guarded_direction_metrics(prefix: str, y_true: np.ndarray | pd.Series, y_pred: np.ndarray | pd.Series) -> dict[str, float]:
@@ -366,6 +443,7 @@ def alert_backtest_metrics(
     confidence: np.ndarray | pd.Series | None = None,
     predicted_return: np.ndarray | pd.Series | None = None,
     movement_threshold: float | None = None,
+    evidence_frame: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     """Evaluate UP/DOWN alerts as trading signals after the production gates."""
     returns = pd.to_numeric(pd.Series(next_return), errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0).to_numpy(dtype=float)
@@ -401,14 +479,32 @@ def alert_backtest_metrics(
 
     up_confidence_threshold = float(settings.ml_alert_up_confidence_threshold)
     down_confidence_threshold = float(settings.ml_alert_down_confidence_threshold)
+    if RISK_TARGET_ENABLED:
+        down_confidence_threshold = min(down_confidence_threshold, 0.68)
     movement_threshold = float(
         movement_threshold if movement_threshold is not None else DIRECTION_FIXED_THRESHOLD if DIRECTION_FIXED_THRESHOLD is not None else MIN_DIRECTION_RETURN
     )
     raw_alert_mask = np.isin(predictions, [DIRECTION_UP, DIRECTION_DOWN])
-    weak_down_return = (predictions == DIRECTION_DOWN) & np.isfinite(predicted_return_values) & (predicted_return_values > -movement_threshold)
+    down_return_floor = -RISK_ALERT_MIN_RETURN if RISK_TARGET_ENABLED else -movement_threshold
+    weak_down_return = (predictions == DIRECTION_DOWN) & np.isfinite(predicted_return_values) & (predicted_return_values > down_return_floor)
+    weak_down_evidence = np.zeros_like(weak_down_return, dtype=bool)
+    down_score_values = np.zeros_like(returns, dtype=float)
+    evidence_count_values = np.zeros_like(returns, dtype=float)
+    if RISK_TARGET_ENABLED and evidence_frame is not None and not evidence_frame.empty:
+        evidence = evidence_frame.iloc[:usable_size].copy()
+        if "prob_down" not in evidence.columns:
+            evidence["prob_down"] = 0.0
+        if "prob_flat" not in evidence.columns:
+            evidence["prob_flat"] = 0.0
+        score, evidence_count = downside_risk_score(evidence)
+        down_score_values = score.to_numpy(dtype=float)[:usable_size]
+        evidence_count_values = evidence_count.to_numpy(dtype=float)[:usable_size]
+        weak_down_evidence = (predictions == DIRECTION_DOWN) & (
+            (down_score_values < DOWN_ALERT_RISK_SCORE_THRESHOLD) | (evidence_count_values < 1)
+        )
     filtered_mask = ((predictions == DIRECTION_UP) & (confidence_values < up_confidence_threshold)) | (
         (predictions == DIRECTION_DOWN) & (confidence_values < down_confidence_threshold)
-    ) | weak_down_return
+    ) | weak_down_return | weak_down_evidence
     final_predictions = predictions.copy()
     final_predictions[filtered_mask] = DIRECTION_FLAT
 
@@ -429,9 +525,11 @@ def alert_backtest_metrics(
         f"{prefix}_alert_up_confidence_threshold": up_confidence_threshold,
         f"{prefix}_alert_down_confidence_threshold": down_confidence_threshold,
         f"{prefix}_alert_backtest_movement_threshold": movement_threshold,
+        f"{prefix}_alert_down_risk_score_threshold": DOWN_ALERT_RISK_SCORE_THRESHOLD if RISK_TARGET_ENABLED else 0.0,
         f"{prefix}_alert_backtest_raw_coverage": float(raw_alert_mask.mean()),
         f"{prefix}_alert_backtest_coverage": float(alert_mask.mean()),
         f"{prefix}_alert_backtest_filtered_ratio": float(filtered_mask.mean()),
+        f"{prefix}_alert_backtest_weak_down_evidence_ratio": float(weak_down_evidence.mean()) if usable_size else 0.0,
         f"{prefix}_alert_backtest_watch_ratio": float((final_predictions == DIRECTION_FLAT).mean()),
         f"{prefix}_alert_backtest_hit_rate": float(alert_hits.sum() / alert_count) if alert_count else 0.0,
         f"{prefix}_alert_backtest_up_count": up_count,
@@ -439,6 +537,7 @@ def alert_backtest_metrics(
         f"{prefix}_alert_backtest_up_hit_rate": float(up_hit.sum() / up_count) if up_count else 0.0,
         f"{prefix}_alert_backtest_down_hit_rate": float(down_hit.sum() / down_count) if down_count else 0.0,
         f"{prefix}_alert_backtest_avg_confidence": float(confidence_values[alert_mask].mean()) if alert_count else 0.0,
+        f"{prefix}_alert_backtest_down_avg_risk_score": float(down_score_values[down_mask].mean()) if down_count else 0.0,
         f"{prefix}_alert_backtest_up_avg_return": float(returns[up_mask].mean()) if up_count else 0.0,
         f"{prefix}_alert_backtest_down_avg_return": float(returns[down_mask].mean()) if down_count else 0.0,
         f"{prefix}_alert_backtest_down_avg_inverse_return": float((-returns[down_mask]).mean()) if down_count else 0.0,
@@ -1310,6 +1409,7 @@ def train_tabular_models(
     decision_metrics[f"{name}_risk_downside_threshold"] = RISK_DOWNSIDE_THRESHOLD
     decision_metrics[f"{name}_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
     decision_metrics[f"{name}_risk_alert_min_return"] = RISK_ALERT_MIN_RETURN
+    decision_metrics[f"{name}_down_alert_risk_score_threshold"] = DOWN_ALERT_RISK_SCORE_THRESHOLD
     alert_metrics = alert_backtest_metrics(
         name,
         y_return_test,
@@ -1317,6 +1417,13 @@ def train_tabular_models(
         display_confidence(direction_probabilities),
         return_predictions,
         movement_threshold=direction_threshold,
+        evidence_frame=pd.concat(
+            [
+                test_df[DOWN_RISK_EVIDENCE_COLUMNS].reset_index(drop=True),
+                direction_probabilities.reset_index(drop=True),
+            ],
+            axis=1,
+        ),
     )
     if enable_walk_forward:
         walk_forward_metrics = run_with_progress(
@@ -1343,6 +1450,7 @@ def train_tabular_models(
             "risk_downside_threshold": RISK_DOWNSIDE_THRESHOLD,
             "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
             "risk_alert_min_return": RISK_ALERT_MIN_RETURN,
+            "down_alert_risk_score_threshold": DOWN_ALERT_RISK_SCORE_THRESHOLD,
         },
     )
 
@@ -1834,6 +1942,7 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
     decision_metrics["lstm_risk_downside_threshold"] = RISK_DOWNSIDE_THRESHOLD
     decision_metrics["lstm_risk_volatility_threshold"] = RISK_VOLATILITY_THRESHOLD
     decision_metrics["lstm_risk_alert_min_return"] = RISK_ALERT_MIN_RETURN
+    decision_metrics["lstm_down_alert_risk_score_threshold"] = DOWN_ALERT_RISK_SCORE_THRESHOLD
     alert_metrics = alert_backtest_metrics(
         "lstm",
         y_return_test,
@@ -1841,6 +1950,13 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
         display_confidence(direction_probabilities),
         return_pred,
         movement_threshold=direction_threshold,
+        evidence_frame=pd.concat(
+            [
+                pd.DataFrame(x_test_raw[:, -1, :], columns=SEQUENCE_FEATURES)[DOWN_RISK_EVIDENCE_COLUMNS].reset_index(drop=True),
+                direction_probabilities.reset_index(drop=True),
+            ],
+            axis=1,
+        ),
     )
     walk_forward_metrics = walk_forward_lstm_direction_metrics(dataset, device)
 
@@ -1874,6 +1990,7 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             "risk_downside_threshold": RISK_DOWNSIDE_THRESHOLD,
             "risk_volatility_threshold": RISK_VOLATILITY_THRESHOLD,
             "risk_alert_min_return": RISK_ALERT_MIN_RETURN,
+            "down_alert_risk_score_threshold": DOWN_ALERT_RISK_SCORE_THRESHOLD,
         },
     )
 
@@ -2268,7 +2385,15 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
         predicted_return = pd.to_numeric(result["predicted_return"], errors="coerce").fillna(0.0)
         down_return_floor = -RISK_ALERT_MIN_RETURN if RISK_TARGET_ENABLED else -movement_threshold
         weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > down_return_floor)
-    weak_alert = low_confidence_up | low_confidence_down | weak_down_return
+    weak_down_evidence = pd.Series(False, index=result.index)
+    if RISK_TARGET_ENABLED:
+        down_score, evidence_count = downside_risk_score(result)
+        result["down_risk_score"] = down_score
+        result["down_evidence_count"] = evidence_count
+        weak_down_evidence = (result["predicted_signal"] == "DOWN") & (
+            (down_score < DOWN_ALERT_RISK_SCORE_THRESHOLD) | (evidence_count < 1)
+        )
+    weak_alert = low_confidence_up | low_confidence_down | weak_down_return | weak_down_evidence
     if not weak_alert.any():
         result["alert_signal"] = result["alert_signal"].where(result["alert_signal"].isin({"UP", "DOWN", "WATCH"}), "WATCH")
         return result
@@ -2440,7 +2565,9 @@ def predict_latest_ensemble(df: pd.DataFrame, results: list[ModelResult], versio
         prediction = predict_latest_lstm(df, result, version, index_df) if result.model_type == "sequence" else predict_latest_tabular(df, result, version, index_df)
         weighted_predictions.append((result.name, ensemble_weight_score(result), prediction))
 
-    merged = weighted_predictions[0][2][["symbol", "company_name", "category", "sector", "last_price"]].copy()
+    base_columns = ["symbol", "company_name", "category", "sector", "last_price"]
+    evidence_columns = [column for column in DOWN_RISK_EVIDENCE_COLUMNS if column in weighted_predictions[0][2].columns]
+    merged = weighted_predictions[0][2][[*base_columns, *evidence_columns]].copy()
     for name, _, prediction in weighted_predictions:
         model_columns = ["symbol", "predicted_next_price", "prob_down", "prob_up", "prob_flat"]
         renamed = prediction[model_columns].rename(
@@ -2506,6 +2633,7 @@ def collect_metrics(results: list[ModelResult], best_model_name: str) -> list[tu
     metrics.append(("prediction", "risk_downside_threshold", float(RISK_DOWNSIDE_THRESHOLD)))
     metrics.append(("prediction", "risk_volatility_threshold", float(RISK_VOLATILITY_THRESHOLD)))
     metrics.append(("prediction", "risk_alert_min_return", float(RISK_ALERT_MIN_RETURN)))
+    metrics.append(("prediction", "down_alert_risk_score_threshold", float(DOWN_ALERT_RISK_SCORE_THRESHOLD)))
     metrics.append(("selection", "best_model_code", float({"random_forest": 1, "lightgbm": 2, "lstm": 3}.get(best_model_name, 0))))
     return metrics
 
