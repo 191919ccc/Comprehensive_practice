@@ -267,13 +267,14 @@ public class DashboardService {
                         ELSE 'WATCH'
                     END AS risk_level,
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
+                    COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap,
                     ROUND(
                         ABS(t.change_pct) * 12
                         + LEAST(LOG10(GREATEST(t.volume, 1)), 10) * 4
                         + COALESCE(a.risk_score, 0) * 18
-                        + CASE COALESCE(m.predicted_signal, 'NONE')
+                        + CASE COALESCE(NULLIF(m.alert_signal, ''), 'WATCH')
                             WHEN 'UP' THEN 8
                             WHEN 'DOWN' THEN 8
                             ELSE 0
@@ -405,6 +406,14 @@ public class DashboardService {
                     COUNT(*) AS prediction_count
                 FROM ml_predictions
                 GROUP BY COALESCE(NULLIF(alert_signal, ''), 'WATCH')
+                ORDER BY prediction_count DESC
+                """));
+        response.put("raw_signal_distribution", fetchRows("""
+                SELECT
+                    COALESCE(NULLIF(predicted_signal, ''), 'WATCH') AS predicted_signal,
+                    COUNT(*) AS prediction_count
+                FROM ml_predictions
+                GROUP BY COALESCE(NULLIF(predicted_signal, ''), 'WATCH')
                 ORDER BY prediction_count DESC
                 """));
         response.put("ml_predictions", fetchRows("""
@@ -899,6 +908,7 @@ public class DashboardService {
                     COALESCE(a.alert_count, 0) AS alert_count,
                     COALESCE(a.high_alert_count, 0) AS high_alert_count,
                     COALESCE(m.predicted_signal, 'NONE') AS predicted_signal,
+                    COALESCE(NULLIF(m.alert_signal, ''), 'WATCH') AS alert_signal,
                     ROUND(COALESCE(m.confidence, 0), 4) AS confidence,
                     ROUND(COALESCE(m.predicted_next_price - m.current_price, 0), 2) AS predicted_gap,
                     ROUND(COALESCE(h.avg_change_pct, 0), 2) AS sector_avg_change_pct,
@@ -906,7 +916,7 @@ public class DashboardService {
                         50
                         + GREATEST(t.change_pct, 0) * 10
                         + LEAST(LOG10(GREATEST(t.volume, 1)) * 3, 30)
-                        + CASE COALESCE(m.predicted_signal, 'NONE')
+                        + CASE COALESCE(NULLIF(m.alert_signal, ''), 'WATCH')
                             WHEN 'UP' THEN 18
                             WHEN 'DOWN' THEN -12
                             ELSE 0

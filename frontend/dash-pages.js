@@ -866,10 +866,14 @@ function renderRanking(id, rows = [], scoreKey) {
     rows.slice(0, 6).forEach((row, index) => {
         const item = document.createElement("article");
         item.className = "card-row";
+        const displaySignal = row.alert_signal || row.predicted_signal || "NONE";
+        const rawSignal = String(row.predicted_signal || "NONE").toUpperCase();
+        const conservativeSignal = String(displaySignal || "NONE").toUpperCase();
+        const rawSignalText = rawSignal !== conservativeSignal && rawSignal !== "NONE" ? `，原始模型：${escapeHtml(signalText(rawSignal))}` : "";
         item.innerHTML = `
             <div>
                 <strong>${index + 1}. ${escapeHtml(row.symbol)} ${escapeHtml(row.company_name)}</strong>
-                <p>${escapeHtml(row.category || "")} / ${escapeHtml(row.sector || "")}，模型信号：${signalTag(row.predicted_signal)}</p>
+                <p>${escapeHtml(row.category || "")} / ${escapeHtml(row.sector || "")}，保守信号：${signalTag(displaySignal)}${rawSignalText}</p>
             </div>
             <span class="mono ${scoreKey === "risk_score" ? "warn" : "up"}">${formatNumber(row[scoreKey])}</span>
         `;
@@ -1176,36 +1180,37 @@ function renderSectorChart(rows = []) {
     });
 }
 
-function renderSignalChart(rows = []) {
+function renderSignalChart(rows = [], rawRows = []) {
     const chart = initChart("signalChart");
     if (!chart) return;
-    const counts = rows.reduce((acc, row) => {
-        const signal = String(row.alert_signal || row.predicted_signal || "WATCH").toUpperCase();
+    const buildCounts = sourceRows => sourceRows.reduce((acc, row) => {
+        const signal = String(row.predicted_signal || "WATCH").toUpperCase();
         acc[signal] = (acc[signal] || 0) + num(row.prediction_count);
         return acc;
     }, {});
-    const signalColors = { UP: "#f0a500", DOWN: "#00C896", WATCH: "#FF4D4D" };
-    const chartData = ["UP", "DOWN", "WATCH"].map(signal => ({
+    const conservativeCounts = buildCounts(rows);
+    const rawCounts = buildCounts(rawRows.length ? rawRows : rows);
+    const signalColors = { UP: "#f0a500", DOWN: "#00C896", WATCH: "#8a8f98" };
+    const toChartData = counts => ["UP", "DOWN", "WATCH"].map(signal => ({
         name: labels[signal] || signal,
         value: counts[signal] || 0,
         itemStyle: { color: signalColors[signal] }
     }));
-    const centerText = `保守信号\n观望 ${formatNumber(counts.WATCH || 0, 0)}\n看多 ${formatNumber(counts.UP || 0, 0)} / 看空 ${formatNumber(counts.DOWN || 0, 0)}`;
+    const finalText = `最终口径\n观望 ${formatNumber(conservativeCounts.WATCH || 0, 0)}\n看多 ${formatNumber(conservativeCounts.UP || 0, 0)} / 看空 ${formatNumber(conservativeCounts.DOWN || 0, 0)}`;
+    const rawText = `原始模型\n观望 ${formatNumber(rawCounts.WATCH || 0, 0)}\n看多 ${formatNumber(rawCounts.UP || 0, 0)} / 看空 ${formatNumber(rawCounts.DOWN || 0, 0)}`;
     chart.setOption({
-        tooltip: { trigger: "item", formatter: "{b}: {c}只 ({d}%)<br/>已按告警置信度过滤" },
+        tooltip: { trigger: "item", formatter: "{a}<br/>{b}: {c}只 ({d}%)" },
         legend: { bottom: 0, textStyle: { color: "#66736a" } },
-        graphic: [{
-            type: "text",
-            left: "center",
-            top: "36%",
-            style: { text: centerText, textAlign: "center", fill: "#2c2a27", fontSize: 12, lineHeight: 18, fontWeight: 600 }
-        }],
-        series: [{
-            type: "pie",
-            radius: ["52%", "74%"],
-            center: ["50%", "44%"],
-            data: chartData
-        }]
+        graphic: [
+            { type: "text", left: "25%", top: "14%", style: { text: "最终保守信号", textAlign: "center", fill: "#2c2a27", fontSize: 13, fontWeight: 700 } },
+            { type: "text", left: "68%", top: "14%", style: { text: "原始模型方向", textAlign: "center", fill: "#66736a", fontSize: 13, fontWeight: 700 } },
+            { type: "text", left: "25%", top: "38%", style: { text: finalText, textAlign: "center", fill: "#2c2a27", fontSize: 12, lineHeight: 18, fontWeight: 600 } },
+            { type: "text", left: "68%", top: "38%", style: { text: rawText, textAlign: "center", fill: "#66736a", fontSize: 12, lineHeight: 18, fontWeight: 600 } }
+        ],
+        series: [
+            { name: "最终保守信号", type: "pie", radius: ["42%", "62%"], center: ["30%", "48%"], data: toChartData(conservativeCounts), label: { fontSize: 11 } },
+            { name: "原始模型方向", type: "pie", radius: ["36%", "54%"], center: ["72%", "48%"], data: toChartData(rawCounts), label: { fontSize: 11 } }
+        ]
     });
 }
 
@@ -1305,7 +1310,7 @@ async function refresh() {
             renderModels(data.model_comparison || [], data.daily_data_freshness || {});
             renderRanking("optimalList", data.optimal_stocks || [], "optimal_score");
             renderRanking("riskList", data.risk_stocks || [], "risk_score");
-            renderSignalChart(data.signal_distribution || []);
+            renderSignalChart(data.signal_distribution || [], data.raw_signal_distribution || []);
         }
         if (page === "market") {
             renderMarketChart(data.market_overview || []);
