@@ -90,7 +90,7 @@
         box.classList.toggle("show", Boolean(show));
     }
     function updateChartModeHint(detail=""){
-        const base=chartMode==="realtime" ? "分钟线接口 · 实时入库行情" : "日线接口 · 历史走势 + T+3";
+        const base=chartMode==="realtime" ? "分钟线接口 · 实时入库行情" : "日线接口 · 历史走势 + T+5";
         setText("chartModeHint", detail ? `${base} · ${detail}` : base);
     }
     function updateClock(){const d=new Date(); const pad=n=>String(n).padStart(2,"0"); setText("clock", `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}  ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`);}
@@ -278,7 +278,7 @@
             mainSignal.textContent=`${textMap[signal]||signal} · ${state.text}`;
             mainSignal.className=pill(signal);
         }
-        const config={type:"line",data:{labels:["当前","T+3预测"],datasets:[
+        const config={type:"line",data:{labels:["当前","T+5预测"],datasets:[
             {label:"当前价格",data:[last,null],borderColor:"#2563eb",backgroundColor:"rgba(37,99,235,.08)",borderWidth:2,pointRadius:3,tension:.2,fill:true},
             {label:"AI预测",data:[last,target],borderColor:"#f59e0b",borderWidth:2,borderDash:[5,4],pointRadius:3,tension:.2}
         ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:"#f1efe8"},ticks:{color:"#888780",font:{size:10}}},y:{grid:{color:"#f1efe8"},ticks:{color:"#888780",font:{size:10}}}}}};

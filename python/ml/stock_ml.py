@@ -52,6 +52,7 @@ SEQUENCE_FEATURES = [
     "return_3",
     "momentum_5",
     "momentum_10",
+    "momentum_20",
     "volume_change",
     "turnover_change",
     "ma_5_gap",
@@ -63,6 +64,9 @@ SEQUENCE_FEATURES = [
     "volatility_5",
     "volatility_10",
     "volatility_20",
+    "max_drawdown_5",
+    "max_drawdown_10",
+    "max_drawdown_20",
     "high_low_range",
     "price_vs_ma20",
     "relative_sector_change_pct",
@@ -80,20 +84,35 @@ SEQUENCE_FEATURES = [
     "sector_up_ratio",
     "sector_return_1",
     "sector_return_3",
+    "sector_momentum_3",
     "sector_relative_return_1",
     "sector_relative_return_3",
+    "sector_relative_return_5",
+    "sector_relative_return_10",
+    "sector_relative_return_20",
+    "sector_return_rank_5",
+    "sector_return_rank_10",
+    "sector_return_rank_20",
     "sector_strength_rank",
     "sector_volatility_5",
     "sector_up_ratio_3",
     "index_sh_return_1",
     "index_sh_return_3",
+    "index_sh_volatility_5",
+    "index_sh_volatility_10",
     "index_cyb_return_1",
     "index_cyb_return_3",
+    "index_cyb_volatility_5",
+    "index_cyb_volatility_10",
     "index_hs300_return_1",
     "index_hs300_return_3",
+    "index_hs300_volatility_5",
+    "index_hs300_volatility_10",
     "market_index_return_1",
     "market_index_return_3",
     "market_index_return_5",
+    "market_index_volatility_5",
+    "market_index_volatility_10",
     "relative_hs300_return_1",
     "relative_hs300_return_3",
     "relative_hs300_return_5",
@@ -114,6 +133,10 @@ SEQUENCE_FEATURES = [
     "volume_spike_20",
     "volume_up_breakout",
     "volume_down_breakout",
+    "volume_expansion_streak_3",
+    "volume_expansion_streak_5",
+    "return_3_x_volume_ratio_20",
+    "momentum_5_x_volume_ratio_20",
 ]
 CATEGORICAL_FEATURES = ["symbol", "category", "sector"]
 TABULAR_FEATURES = [*CATEGORICAL_FEATURES, *SEQUENCE_FEATURES]
@@ -149,23 +172,23 @@ OPTIMAL_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "calibration": "sigmoid",
     },
     "lightgbm": {
-        "direction_threshold": 0.015,
-        "n_estimators": 350,
+        "direction_threshold": 0.02,
+        "n_estimators": 500,
         "learning_rate": 0.02,
-        "num_leaves": 63,
-        "min_child_samples": 40,
+        "num_leaves": 31,
+        "min_child_samples": 80,
         "subsample": 0.8,
         "colsample_bytree": 0.85,
-        "reg_lambda": 1.5,
+        "reg_lambda": 5.0,
     },
     "lstm": {
-        "direction_threshold": 0.015,
+        "direction_threshold": 0.02,
         "window": 30,
-        "hidden": 64,
+        "hidden": 48,
         "head": 32,
         "layers": 1,
-        "dropout": 0.35,
-        "lr": 0.0005,
+        "dropout": 0.40,
+        "lr": 0.0003,
         "weight_decay": 0.002,
         "batch_size": 128,
     },
@@ -174,12 +197,18 @@ INDEX_FEATURE_COLUMNS = [
     "index_sh_return_1",
     "index_sh_return_3",
     "index_sh_return_5",
+    "index_sh_volatility_5",
+    "index_sh_volatility_10",
     "index_cyb_return_1",
     "index_cyb_return_3",
     "index_cyb_return_5",
+    "index_cyb_volatility_5",
+    "index_cyb_volatility_10",
     "index_hs300_return_1",
     "index_hs300_return_3",
     "index_hs300_return_5",
+    "index_hs300_volatility_5",
+    "index_hs300_volatility_10",
 ]
 INDEX_SYMBOL_FEATURE_PREFIX = {
     "INDEX_SH000001": "index_sh",
@@ -571,9 +600,13 @@ def build_index_feature_frame(index_df: pd.DataFrame | None) -> pd.DataFrame:
     frame["index_return_1"] = grouped["last_price"].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
     frame["index_return_3"] = grouped["last_price"].pct_change(3).replace([np.inf, -np.inf], 0).fillna(0)
     frame["index_return_5"] = grouped["last_price"].pct_change(5).replace([np.inf, -np.inf], 0).fillna(0)
+    frame["index_volatility_5"] = grouped["index_return_1"].transform(lambda item: item.rolling(5, min_periods=2).std()).fillna(0)
+    frame["index_volatility_10"] = grouped["index_return_1"].transform(lambda item: item.rolling(10, min_periods=3).std()).fillna(0)
     parts: list[pd.DataFrame] = []
     for symbol, prefix in INDEX_SYMBOL_FEATURE_PREFIX.items():
-        selected = frame[frame["symbol"] == symbol][["trade_date", "index_return_1", "index_return_3", "index_return_5"]].copy()
+        selected = frame[frame["symbol"] == symbol][
+            ["trade_date", "index_return_1", "index_return_3", "index_return_5", "index_volatility_5", "index_volatility_10"]
+        ].copy()
         if selected.empty:
             continue
         selected = selected.groupby("trade_date", as_index=False).last()
@@ -582,6 +615,8 @@ def build_index_feature_frame(index_df: pd.DataFrame | None) -> pd.DataFrame:
                 "index_return_1": f"{prefix}_return_1",
                 "index_return_3": f"{prefix}_return_3",
                 "index_return_5": f"{prefix}_return_5",
+                "index_volatility_5": f"{prefix}_volatility_5",
+                "index_volatility_10": f"{prefix}_volatility_10",
             }
         )
         parts.append(selected)
@@ -625,6 +660,7 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sorted_df["return_3"] = grouped["last_price"].pct_change(3).replace([np.inf, -np.inf], 0).fillna(0)
     sorted_df["momentum_5"] = grouped["last_price"].pct_change(5).replace([np.inf, -np.inf], 0).fillna(0)
     sorted_df["momentum_10"] = grouped["last_price"].pct_change(10).replace([np.inf, -np.inf], 0).fillna(0)
+    sorted_df["momentum_20"] = grouped["last_price"].pct_change(20).replace([np.inf, -np.inf], 0).fillna(0)
     sorted_df["volume_change"] = grouped["volume"].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
     sorted_df["turnover_change"] = grouped["turnover"].pct_change().replace([np.inf, -np.inf], 0).fillna(0)
     ma_5 = grouped["last_price"].transform(lambda item: item.rolling(5, min_periods=1).mean())
@@ -642,6 +678,15 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sorted_df["volatility_5"] = grouped["return_1"].transform(lambda item: item.rolling(5, min_periods=2).std()).fillna(0)
     sorted_df["volatility_10"] = grouped["return_1"].transform(lambda item: item.rolling(10, min_periods=3).std()).fillna(0)
     sorted_df["volatility_20"] = grouped["return_1"].transform(lambda item: item.rolling(20, min_periods=5).std()).fillna(0)
+    def rolling_max_drawdown(item: pd.Series, window: int) -> pd.Series:
+        return item.rolling(window, min_periods=2).apply(
+            lambda values: float(np.min(values / np.maximum.accumulate(values) - 1.0)),
+            raw=True,
+        )
+
+    sorted_df["max_drawdown_5"] = grouped["last_price"].transform(lambda item: rolling_max_drawdown(item, 5)).fillna(0)
+    sorted_df["max_drawdown_10"] = grouped["last_price"].transform(lambda item: rolling_max_drawdown(item, 10)).fillna(0)
+    sorted_df["max_drawdown_20"] = grouped["last_price"].transform(lambda item: rolling_max_drawdown(item, 20)).fillna(0)
     sorted_df["high_low_range"] = np.where(
         sorted_df["last_price"].abs() > 1e-8,
         (sorted_df["high_price"] - sorted_df["low_price"]) / sorted_df["last_price"],
@@ -659,10 +704,19 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sorted_df["sector_up_ratio"] = sorted_df.groupby(["sector", "event_time"])["change_pct"].transform(lambda item: (item > 0).mean()).fillna(0.5) - 0.5
     sorted_df["sector_return_1"] = sorted_df.groupby(["sector", "event_time"])["return_1"].transform("mean").fillna(0)
     sorted_df["sector_return_3"] = sorted_df.groupby(["sector", "event_time"])["return_3"].transform("mean").fillna(0)
+    sorted_df["sector_momentum_3"] = sorted_df["sector_return_3"]
     sorted_df["sector_momentum_5"] = sorted_df.groupby(["sector", "event_time"])["momentum_5"].transform("mean").fillna(0)
+    sorted_df["sector_momentum_10"] = sorted_df.groupby(["sector", "event_time"])["momentum_10"].transform("mean").fillna(0)
+    sorted_df["sector_momentum_20"] = sorted_df.groupby(["sector", "event_time"])["momentum_20"].transform("mean").fillna(0)
     sorted_df["market_momentum_5"] = sorted_df.groupby(["market", "event_time"])["momentum_5"].transform("mean").fillna(0)
     sorted_df["sector_relative_return_1"] = (sorted_df["return_1"] - sorted_df["sector_return_1"]).fillna(0)
     sorted_df["sector_relative_return_3"] = (sorted_df["return_3"] - sorted_df["sector_return_3"]).fillna(0)
+    sorted_df["sector_relative_return_5"] = (sorted_df["momentum_5"] - sorted_df["sector_momentum_5"]).fillna(0)
+    sorted_df["sector_relative_return_10"] = (sorted_df["momentum_10"] - sorted_df["sector_momentum_10"]).fillna(0)
+    sorted_df["sector_relative_return_20"] = (sorted_df["momentum_20"] - sorted_df["sector_momentum_20"]).fillna(0)
+    sorted_df["sector_return_rank_5"] = sorted_df.groupby(["sector", "event_time"])["momentum_5"].rank(pct=True).fillna(0.5) - 0.5
+    sorted_df["sector_return_rank_10"] = sorted_df.groupby(["sector", "event_time"])["momentum_10"].rank(pct=True).fillna(0.5) - 0.5
+    sorted_df["sector_return_rank_20"] = sorted_df.groupby(["sector", "event_time"])["momentum_20"].rank(pct=True).fillna(0.5) - 0.5
     sector_strength = (
         sorted_df[["sector", "event_time", "sector_return_1"]]
         .drop_duplicates()
@@ -687,6 +741,16 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
         [sorted_df["market"] == "SH", is_chinext],
         [sorted_df["index_sh_return_5"], sorted_df["index_cyb_return_5"]],
         default=sorted_df["index_hs300_return_5"],
+    )
+    sorted_df["market_index_volatility_5"] = np.select(
+        [sorted_df["market"] == "SH", is_chinext],
+        [sorted_df["index_sh_volatility_5"], sorted_df["index_cyb_volatility_5"]],
+        default=sorted_df["index_hs300_volatility_5"],
+    )
+    sorted_df["market_index_volatility_10"] = np.select(
+        [sorted_df["market"] == "SH", is_chinext],
+        [sorted_df["index_sh_volatility_10"], sorted_df["index_cyb_volatility_10"]],
+        default=sorted_df["index_hs300_volatility_10"],
     )
     sorted_df["current_vs_market_index_return"] = (sorted_df["change_pct_scaled"] - sorted_df["market_index_return_1"]).fillna(0)
     sorted_df["relative_sh_index_return_1"] = (sorted_df["return_1"] - sorted_df["index_sh_return_1"]).fillna(0)
@@ -733,6 +797,11 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
     sorted_df["volume_spike_20"] = (sorted_df["volume_ratio_20_raw"] >= 2.0).astype(float)
     sorted_df["volume_up_breakout"] = ((sorted_df["return_1"] > 0) & (sorted_df["volume_ratio_20_raw"] >= 1.5)).astype(float)
     sorted_df["volume_down_breakout"] = ((sorted_df["return_1"] < 0) & (sorted_df["volume_ratio_20_raw"] >= 1.5)).astype(float)
+    volume_expanding = (sorted_df["volume_ratio_20_raw"] >= 1.2).astype(float)
+    sorted_df["volume_expansion_streak_3"] = volume_expanding.groupby(sorted_df["symbol"]).transform(lambda item: item.rolling(3, min_periods=1).sum()) / 3.0
+    sorted_df["volume_expansion_streak_5"] = volume_expanding.groupby(sorted_df["symbol"]).transform(lambda item: item.rolling(5, min_periods=1).sum()) / 5.0
+    sorted_df["return_3_x_volume_ratio_20"] = sorted_df["return_3"] * sorted_df["volume_ratio_20_raw"]
+    sorted_df["momentum_5_x_volume_ratio_20"] = sorted_df["momentum_5"] * sorted_df["volume_ratio_20_raw"]
     sorted_df["volume_price_corr"] = 0.0
     for _, index in sorted_df.groupby("symbol", sort=False).groups.items():
         group = sorted_df.loc[index]
@@ -1263,18 +1332,19 @@ def train_lightgbm(dataset: pd.DataFrame) -> ModelResult:
         from lightgbm import LGBMClassifier, LGBMRegressor
     except ImportError as exc:
         raise RuntimeError("lightgbm is not installed, skip LightGBM model") from exc
+    config = OPTIMAL_MODEL_CONFIGS["lightgbm"]
 
     return train_tabular_models(
         dataset,
         "lightgbm",
         LGBMRegressor(
-            n_estimators=350,
-            learning_rate=0.02,
-            num_leaves=63,
-            min_child_samples=40,
-            subsample=0.8,
-            colsample_bytree=0.85,
-            reg_lambda=1.5,
+            n_estimators=int(config["n_estimators"]),
+            learning_rate=float(config["learning_rate"]),
+            num_leaves=int(config["num_leaves"]),
+            min_child_samples=int(config["min_child_samples"]),
+            subsample=float(config["subsample"]),
+            colsample_bytree=float(config["colsample_bytree"]),
+            reg_lambda=float(config["reg_lambda"]),
             random_state=42,
             verbose=-1,
             verbosity=-1,
@@ -1282,13 +1352,13 @@ def train_lightgbm(dataset: pd.DataFrame) -> ModelResult:
             n_jobs=-1,
         ),
         LGBMClassifier(
-            n_estimators=350,
-            learning_rate=0.02,
-            num_leaves=63,
-            min_child_samples=40,
-            subsample=0.8,
-            colsample_bytree=0.85,
-            reg_lambda=1.5,
+            n_estimators=int(config["n_estimators"]),
+            learning_rate=float(config["learning_rate"]),
+            num_leaves=int(config["num_leaves"]),
+            min_child_samples=int(config["min_child_samples"]),
+            subsample=float(config["subsample"]),
+            colsample_bytree=float(config["colsample_bytree"]),
+            reg_lambda=float(config["reg_lambda"]),
             random_state=42,
             verbose=-1,
             verbosity=-1,

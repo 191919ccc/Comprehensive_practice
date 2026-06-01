@@ -75,27 +75,27 @@ class Settings:
     ml_lstm_early_stop_patience = int(os.getenv("ML_LSTM_EARLY_STOP_PATIENCE", "8"))
     ml_lstm_max_sequences = int(os.getenv("ML_LSTM_MAX_SEQUENCES", "80000"))
     ml_lstm_window_size = int(os.getenv("ML_LSTM_WINDOW_SIZE", "30"))
-    ml_lstm_hidden_size = int(os.getenv("ML_LSTM_HIDDEN_SIZE", "64"))
+    ml_lstm_hidden_size = int(os.getenv("ML_LSTM_HIDDEN_SIZE", "48"))
     ml_lstm_head_size = int(os.getenv("ML_LSTM_HEAD_SIZE", "32"))
     ml_lstm_num_layers = int(os.getenv("ML_LSTM_NUM_LAYERS", "1"))
-    ml_lstm_dropout = float(os.getenv("ML_LSTM_DROPOUT", "0.35"))
-    ml_lstm_learning_rate = float(os.getenv("ML_LSTM_LEARNING_RATE", "0.0005"))
+    ml_lstm_dropout = float(os.getenv("ML_LSTM_DROPOUT", "0.40"))
+    ml_lstm_learning_rate = float(os.getenv("ML_LSTM_LEARNING_RATE", "0.0003"))
     ml_lstm_weight_decay = float(os.getenv("ML_LSTM_WEIGHT_DECAY", "0.002"))
     ml_lstm_batch_size = int(os.getenv("ML_LSTM_BATCH_SIZE", "128"))
     ml_rf_full_calibration = os.getenv("ML_RF_FULL_CALIBRATION", "true").strip().lower() in {"1", "true", "yes", "on"}
     ml_rf_walk_forward = os.getenv("ML_RF_WALK_FORWARD", "true").strip().lower() in {"1", "true", "yes", "on"}
     ml_rf_n_jobs = int(os.getenv("ML_RF_N_JOBS", "4"))
     ml_training_lookback_days = int(os.getenv("ML_TRAINING_LOOKBACK_DAYS", "1500"))
-    ml_direction_threshold = float(os.getenv("ML_DIRECTION_THRESHOLD", "0.015"))
-    ml_prediction_horizon = int(os.getenv("ML_PREDICTION_HORIZON", "3"))
+    ml_direction_threshold = float(os.getenv("ML_DIRECTION_THRESHOLD", "0.020"))
+    ml_prediction_horizon = int(os.getenv("ML_PREDICTION_HORIZON", "5"))
     ml_horizon_experiments = os.getenv("ML_HORIZON_EXPERIMENTS", "1,3,5")
     ml_prediction_return_signal_threshold = float(os.getenv("ML_PREDICTION_RETURN_SIGNAL_THRESHOLD", "0.003"))
     # 日线训练数据时效阈值。训练入口会在数据过旧时中止，避免前端展示“新预测、旧数据”的状态。
     ml_max_daily_data_age_days = int(os.getenv("ML_MAX_DAILY_DATA_AGE_DAYS", "10"))
     ml_allow_stale_daily_data = os.getenv("ML_ALLOW_STALE_DAILY_DATA", "false").strip().lower() in {"1", "true", "yes", "on"}
     # 告警侧置信度过滤只影响 alert_signal，不覆盖 predicted_signal，保证漂移检测评估真实模型方向。
-    ml_alert_confidence_threshold = float(os.getenv("ML_ALERT_CONFIDENCE_THRESHOLD", "0.60"))
-    ml_alert_up_confidence_threshold = float(os.getenv("ML_ALERT_UP_CONFIDENCE_THRESHOLD", os.getenv("ML_ALERT_CONFIDENCE_THRESHOLD", "0.60")))
+    ml_alert_confidence_threshold = float(os.getenv("ML_ALERT_CONFIDENCE_THRESHOLD", "0.64"))
+    ml_alert_up_confidence_threshold = float(os.getenv("ML_ALERT_UP_CONFIDENCE_THRESHOLD", os.getenv("ML_ALERT_CONFIDENCE_THRESHOLD", "0.64")))
     ml_alert_down_confidence_threshold = float(os.getenv("ML_ALERT_DOWN_CONFIDENCE_THRESHOLD", "0.75"))
 
     @property

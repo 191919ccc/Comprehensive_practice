@@ -15,7 +15,7 @@ def main() -> None:
     """Generate daily predictions from the latest trained daily models without retraining."""
     stock_ml.MIN_DIRECTION_RETURN = float(stock_ml.settings.ml_direction_threshold)
     stock_ml.DIRECTION_FIXED_THRESHOLD = float(stock_ml.settings.ml_direction_threshold)
-    stock_ml.PREDICTION_HORIZON = 3
+    stock_ml.PREDICTION_HORIZON = max(1, int(stock_ml.settings.ml_prediction_horizon))
     stock_ml.LSTM_WINDOW_SIZE = max(5, int(stock_ml.settings.ml_lstm_window_size))
 
     print("[daily-predict] loading daily_stock_bars", flush=True)
