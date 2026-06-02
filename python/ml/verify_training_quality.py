@@ -80,6 +80,20 @@ def fetch_latest_version(cursor, version_prefix: str) -> str | None:
     return str(row["model_version"]) if row else None
 
 
+def fetch_recent_versions(cursor, limit: int = 5) -> list[dict[str, Any]]:
+    cursor.execute(
+        """
+        SELECT model_version, COUNT(*) AS metric_count, MAX(created_at) AS latest_metric_time
+        FROM ml_model_metrics
+        GROUP BY model_version
+        ORDER BY MAX(id) DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return list(cursor.fetchall())
+
+
 def fetch_metrics(cursor, version: str) -> dict[tuple[str, str], float]:
     cursor.execute(
         """
@@ -167,7 +181,19 @@ def main() -> None:
         with conn.cursor() as cursor:
             version = fetch_latest_version(cursor, args.version_prefix)
             if not version:
-                raise SystemExit("[verify-ml] no ml_model_metrics version found.")
+                recent_versions = fetch_recent_versions(cursor)
+                prefix_text = f" with prefix {args.version_prefix!r}" if args.version_prefix else ""
+                print(f"[verify-ml] no ml_model_metrics version found{prefix_text}.", flush=True)
+                if recent_versions:
+                    print("[verify-ml] recent versions:", flush=True)
+                    for row in recent_versions:
+                        print(
+                            f"[verify-ml]   {row['model_version']} "
+                            f"metrics={row['metric_count']} latest={row['latest_metric_time']}",
+                            flush=True,
+                        )
+                print("[verify-ml] run .\\tools\\train_clean_risk.ps1 before verifying clean-risk output.", flush=True)
+                raise SystemExit(1)
             metrics = fetch_metrics(cursor, version)
             passed, checks = evaluate_quality(metrics, args)
             prediction_summary = fetch_prediction_summary(cursor, version)
