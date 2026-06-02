@@ -1048,6 +1048,103 @@ def select_training_sources(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def prepare_feature_frame(df: pd.DataFrame, index_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Clean raw rows once and build reusable technical features."""
+    cleaned_input = clean_price_frame(df, context="training_input")
+    feature_df = add_technical_features(
+        collapse_repeated_price_ticks(select_training_sources(cleaned_input)),
+        index_df,
+        already_clean=True,
+    )
+    feature_df.attrs["quality_report"] = dict(cleaned_input.attrs.get("quality_report", {}))
+    return feature_df
+
+
+def build_supervised_dataset(
+    feature_df: pd.DataFrame,
+    direction_threshold: float | None = None,
+    prediction_horizon: int | None = None,
+) -> pd.DataFrame:
+    """Attach supervised-learning labels to a reusable feature frame."""
+    horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
+    sorted_df = feature_df.copy()
+    quality_report = dict(feature_df.attrs.get("quality_report", {}))
+    grouped_price = sorted_df.groupby("symbol")["last_price"]
+    next_price = grouped_price.shift(-horizon)
+    next_return = np.where(
+        sorted_df["last_price"].abs() > 1e-8,
+        (next_price - sorted_df["last_price"]) / sorted_df["last_price"],
+        0,
+    )
+    future_price_frame = pd.concat(
+        [grouped_price.shift(-step) for step in range(1, horizon + 1)],
+        axis=1,
+    )
+    future_min_price = future_price_frame.min(axis=1)
+    future_max_price = future_price_frame.max(axis=1)
+    future_min_return = np.where(
+        sorted_df["last_price"].abs() > 1e-8,
+        (future_min_price - sorted_df["last_price"]) / sorted_df["last_price"],
+        0,
+    )
+    future_range_return = np.where(
+        sorted_df["last_price"].abs() > 1e-8,
+        (future_max_price - future_min_price) / sorted_df["last_price"],
+        0,
+    )
+    adaptive_threshold = sorted_df.groupby("symbol")["return_1"].transform(
+        lambda item: item.rolling(DIRECTION_VOLATILITY_WINDOW, min_periods=5).std()
+    )
+    adaptive_threshold = (adaptive_threshold * DIRECTION_THRESHOLD_MULTIPLIER).replace([np.inf, -np.inf], np.nan)
+    fixed_threshold = direction_threshold if direction_threshold is not None else DIRECTION_FIXED_THRESHOLD
+    if fixed_threshold is not None:
+        direction_threshold_series = pd.Series(float(fixed_threshold), index=sorted_df.index)
+    else:
+        direction_threshold_series = adaptive_threshold.fillna(MIN_DIRECTION_RETURN).clip(lower=MIN_DIRECTION_RETURN)
+    if RISK_TARGET_ENABLED:
+        risk_threshold = np.maximum(direction_threshold_series, RISK_DOWNSIDE_THRESHOLD)
+        downside_risk = (
+            (next_return <= -risk_threshold)
+            | (future_min_return <= -risk_threshold)
+            | (
+                (future_range_return >= RISK_VOLATILITY_THRESHOLD)
+                & (future_min_return <= -(risk_threshold * 0.7))
+            )
+        )
+        next_direction = np.where(downside_risk, DIRECTION_DOWN, DIRECTION_FLAT)
+    else:
+        next_direction = np.select(
+            [
+                next_return > direction_threshold_series,
+                next_return < -direction_threshold_series,
+            ],
+            [DIRECTION_UP, DIRECTION_DOWN],
+            default=DIRECTION_FLAT,
+        )
+    label_columns = pd.DataFrame(
+        {
+            "next_price": next_price,
+            "next_return": next_return,
+            "future_min_price": future_min_price,
+            "future_max_price": future_max_price,
+            "future_min_return": future_min_return,
+            "future_range_return": future_range_return,
+            "direction_threshold": direction_threshold_series,
+            "next_direction": next_direction,
+            "target_mode": ML_TARGET_MODE,
+        },
+        index=sorted_df.index,
+    )
+    sorted_df = pd.concat([sorted_df, label_columns], axis=1)
+    sorted_df = sorted_df.dropna(subset=["next_price"])
+    sorted_df["next_direction"] = sorted_df["next_direction"].astype(int)
+    sorted_df.attrs["direction_threshold"] = float(sorted_df["direction_threshold"].iloc[0]) if not sorted_df.empty else None
+    sorted_df.attrs["prediction_horizon"] = horizon
+    sorted_df.attrs["target_mode"] = ML_TARGET_MODE
+    sorted_df.attrs["quality_report"] = quality_report
+    return sorted_df
+
+
 def prepare_dataset(
     df: pd.DataFrame,
     index_df: pd.DataFrame | None = None,
@@ -1061,69 +1158,11 @@ def prepare_dataset(
     means the third future stored tick for the same symbol, not necessarily
     exactly three wall-clock minutes.
     """
-    horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
-    cleaned_input = clean_price_frame(df, context="training_input")
-    sorted_df = add_technical_features(collapse_repeated_price_ticks(select_training_sources(cleaned_input)), index_df, already_clean=True)
-    sorted_df.attrs["quality_report"] = dict(cleaned_input.attrs.get("quality_report", {}))
-    sorted_df["next_price"] = sorted_df.groupby("symbol")["last_price"].shift(-horizon)
-    sorted_df["next_return"] = np.where(
-        sorted_df["last_price"].abs() > 1e-8,
-        (sorted_df["next_price"] - sorted_df["last_price"]) / sorted_df["last_price"],
-        0,
+    return build_supervised_dataset(
+        prepare_feature_frame(df, index_df),
+        direction_threshold=direction_threshold,
+        prediction_horizon=prediction_horizon,
     )
-    future_price_frame = pd.concat(
-        [sorted_df.groupby("symbol")["last_price"].shift(-step) for step in range(1, horizon + 1)],
-        axis=1,
-    )
-    sorted_df["future_min_price"] = future_price_frame.min(axis=1)
-    sorted_df["future_max_price"] = future_price_frame.max(axis=1)
-    sorted_df["future_min_return"] = np.where(
-        sorted_df["last_price"].abs() > 1e-8,
-        (sorted_df["future_min_price"] - sorted_df["last_price"]) / sorted_df["last_price"],
-        0,
-    )
-    sorted_df["future_range_return"] = np.where(
-        sorted_df["last_price"].abs() > 1e-8,
-        (sorted_df["future_max_price"] - sorted_df["future_min_price"]) / sorted_df["last_price"],
-        0,
-    )
-    adaptive_threshold = sorted_df.groupby("symbol")["return_1"].transform(
-        lambda item: item.rolling(DIRECTION_VOLATILITY_WINDOW, min_periods=5).std()
-    )
-    adaptive_threshold = (adaptive_threshold * DIRECTION_THRESHOLD_MULTIPLIER).replace([np.inf, -np.inf], np.nan)
-    fixed_threshold = direction_threshold if direction_threshold is not None else DIRECTION_FIXED_THRESHOLD
-    if fixed_threshold is not None:
-        sorted_df["direction_threshold"] = float(fixed_threshold)
-    else:
-        sorted_df["direction_threshold"] = adaptive_threshold.fillna(MIN_DIRECTION_RETURN).clip(lower=MIN_DIRECTION_RETURN)
-    if RISK_TARGET_ENABLED:
-        risk_threshold = np.maximum(sorted_df["direction_threshold"], RISK_DOWNSIDE_THRESHOLD)
-        downside_risk = (
-            (sorted_df["next_return"] <= -risk_threshold)
-            | (sorted_df["future_min_return"] <= -risk_threshold)
-            | (
-                (sorted_df["future_range_return"] >= RISK_VOLATILITY_THRESHOLD)
-                & (sorted_df["future_min_return"] <= -(risk_threshold * 0.7))
-            )
-        )
-        sorted_df["next_direction"] = np.where(downside_risk, DIRECTION_DOWN, DIRECTION_FLAT)
-        sorted_df["target_mode"] = ML_TARGET_MODE
-    else:
-        sorted_df["next_direction"] = np.select(
-            [
-                sorted_df["next_return"] > sorted_df["direction_threshold"],
-                sorted_df["next_return"] < -sorted_df["direction_threshold"],
-            ],
-            [DIRECTION_UP, DIRECTION_DOWN],
-            default=DIRECTION_FLAT,
-        )
-        sorted_df["target_mode"] = ML_TARGET_MODE
-    sorted_df = sorted_df.dropna(subset=["next_price"])
-    sorted_df["next_direction"] = sorted_df["next_direction"].astype(int)
-    sorted_df.attrs["direction_threshold"] = float(sorted_df["direction_threshold"].iloc[0]) if not sorted_df.empty else None
-    sorted_df.attrs["prediction_horizon"] = horizon
-    sorted_df.attrs["target_mode"] = ML_TARGET_MODE
-    return sorted_df
 
 
 def prepare_model_datasets(
@@ -1136,13 +1175,14 @@ def prepare_model_datasets(
     datasets: dict[str, pd.DataFrame] = {}
     dataset_by_key: dict[tuple[float, int], pd.DataFrame] = {}
     horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
+    feature_df = prepare_feature_frame(df, index_df)
     for model_name, config in OPTIMAL_MODEL_CONFIGS.items():
         if model_names is not None and model_name not in model_names:
             continue
         threshold = float(config["direction_threshold"])
         key = (threshold, horizon)
         if key not in dataset_by_key:
-            prepared = prepare_dataset(df, index_df, direction_threshold=threshold, prediction_horizon=horizon)
+            prepared = build_supervised_dataset(feature_df, direction_threshold=threshold, prediction_horizon=horizon)
             before_limit = len(prepared)
             limited = limit_training_dataset(prepared)
             limited.attrs["direction_threshold"] = threshold
@@ -1218,9 +1258,10 @@ def horizon_experiment_metrics(
     """Compare label balance for T+1/T+3/T+5 style daily targets."""
     metrics: list[tuple[str, str, float]] = []
     selected_horizons = horizons or PREDICTION_HORIZON_EXPERIMENTS
+    feature_df = prepare_feature_frame(df, index_df)
     for horizon in selected_horizons:
         horizon_value = max(1, int(horizon))
-        dataset = prepare_dataset(df, index_df, direction_threshold=direction_threshold, prediction_horizon=horizon_value)
+        dataset = build_supervised_dataset(feature_df, direction_threshold=direction_threshold, prediction_horizon=horizon_value)
         if dataset.empty or "next_direction" not in dataset.columns:
             continue
         labels = dataset["next_direction"].astype(int).to_numpy()
