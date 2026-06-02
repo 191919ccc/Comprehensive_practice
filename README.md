@@ -180,7 +180,19 @@ mvn -q -DskipTests package
 
 `random_forest` 仍保留在代码中作为可选实验模型，但默认训练和写库不再启用，避免完整校准和 walk-forward 评估拖慢正式训练。
 
-正式重新训练命令：
+推荐使用一键训练与验证脚本：
+
+```powershell
+.\tools\train_clean_risk.ps1
+```
+
+脚本会先执行轻量 `--no-write` 检查，再执行正式训练，最后自动运行 `verify_training_quality`。如果只想跳过轻量检查，可使用：
+
+```powershell
+.\tools\train_clean_risk.ps1 -SkipCheck
+```
+
+底层正式重新训练命令：
 
 ```powershell
 $env:ML_MAX_TRAIN_ROWS='120000'
