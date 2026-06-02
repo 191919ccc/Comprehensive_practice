@@ -2727,6 +2727,10 @@ def normalized_ensemble_weights(results: list[ModelResult]) -> dict[str, float]:
                     down_inverse_return = metric_value(result, "_alert_backtest_down_avg_inverse_return", 0.0)
                     guard_used = metric_value(result, "_walk_forward_validation_guard_used", 0.0)
                     down_coverage = metric_value(result, "_walk_forward_predicted_down_ratio", 0.0)
+                    max_down_coverage = metric_value(result, "_calibration_max_down_coverage", 0.42)
+                    unstable_risk_coverage = down_coverage > max(max_down_coverage + 0.08, 0.50)
+                    if wf_lift < 0 and unstable_risk_coverage:
+                        cap = 0.0
                     if wf_lift <= 0 or down_inverse_return <= 0 or guard_used >= 1:
                         cap = min(cap, 0.05)
                     if down_coverage > 0.55:
@@ -2737,6 +2741,7 @@ def normalized_ensemble_weights(results: list[ModelResult]) -> dict[str, float]:
 
     aux_sum = min(sum(weights.values()), max(0.0, 1.0 - lightgbm_min_weight))
     weights["lightgbm"] = max(lightgbm_min_weight, 1.0 - aux_sum)
+    weights = {name: weight for name, weight in weights.items() if weight > 0}
     total = sum(weights.values())
     return {name: float(weight / total) for name, weight in weights.items()} if total > 0 else {"lightgbm": 1.0}
 
