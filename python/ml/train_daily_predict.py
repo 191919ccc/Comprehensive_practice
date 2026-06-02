@@ -120,6 +120,11 @@ def parse_args() -> argparse.Namespace:
         default=stock_ml.settings.ml_horizon_experiments,
         help="Comma-separated horizons used for label-distribution diagnostics, for example 1,3,5.",
     )
+    parser.add_argument(
+        "--allow-quality-gate-fail",
+        action="store_true",
+        help="Allow saving/writing a formal model even when the training quality gate fails. Use only for debugging.",
+    )
     return parser.parse_args()
 
 
@@ -285,13 +290,24 @@ def main() -> None:
         metrics.extend(threshold_experiment_metrics(experiment_dataset))
         experiment_threshold = float(args.direction_threshold) if args.direction_threshold is not None else float(stock_ml.OPTIMAL_MODEL_CONFIGS["lightgbm"]["direction_threshold"])
         metrics.extend(horizon_experiment_metrics(ticks, index_ticks, experiment_threshold, experiment_horizons))
-        append_training_quality_gate(metrics)
+        quality_gate = append_training_quality_gate(metrics)
     print(f"[daily-ml] collected metrics count={len(metrics)}", flush=True)
     print_training_quality_summary(metrics, predictions)
 
     if args.no_write:
         drift_result = {"skipped": True, "reason": "no-write"}
     else:
+        if quality_gate.get("passed", 0.0) < 1.0 and not args.allow_quality_gate_fail:
+            failed_checks = [
+                name
+                for name, value in quality_gate.items()
+                if name.endswith("_ok") and float(value) < 1.0
+            ]
+            raise SystemExit(
+                "[daily-ml] quality gate failed; skip saving models and writing MySQL. "
+                f"failed_checks={failed_checks}. "
+                "Use --allow-quality-gate-fail only for debugging."
+            )
         with log_stage("save models"):
             save_models(model_results, version)
         with log_stage("write results"):
