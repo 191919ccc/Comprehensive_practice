@@ -29,6 +29,7 @@ from python.common.stock_utils import (
     infer_sector,
     is_valid_tick,
     now_ts,
+    normalize_quote_text,
     safe_float,
     safe_int,
     sina_code,
@@ -55,7 +56,7 @@ def normalize_quote(
     """
 
     symbol = symbol_info["symbol"].upper()
-    return {
+    return normalize_quote_text({
         "event_id": str(uuid.uuid4()),
         "symbol": symbol,
         "company_name": symbol_info.get("company_name", symbol),
@@ -72,7 +73,7 @@ def normalize_quote(
         "turnover": round(float(last_price) * int(volume), 2),
         "event_time": now_ts(),
         "source": source,
-    }
+    })
 
 
 def fetch_from_eastmoney(symbol_info: dict) -> dict:

@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
+DEFAULT_TEXT = {
+    "company_name": "",
+    "category": "Unknown",
+    "sector": "Other",
+}
+
 
 def detect_market(symbol: str, market_hint: str = "") -> str:
     """Infer the domestic market from a stock code.
@@ -44,25 +50,78 @@ def calc_change_pct(price: float, previous_close: float) -> float:
     return round((price - previous_close) / previous_close * 100, 4)
 
 
+def market_change_limit(symbol: str, market_hint: str = "") -> float | None:
+    """Return a conservative daily percent-change sanity limit.
+
+    The value is not a trading rule. It is a data-quality guard used to reject
+    clearly broken source responses before they pollute storage or training.
+    """
+
+    market = detect_market(symbol, market_hint)
+    normalized = str(symbol).strip().upper()
+    if market == "BJ":
+        return 31.0
+    if market in {"SH", "SZ"}:
+        if normalized.startswith(("300", "301", "688")):
+            return 21.0
+        return 11.0
+    if market == "HK":
+        return 30.0
+    if market in {"US", "NASDAQ", "NYSE"}:
+        return 25.0
+    if market == "INDEX":
+        return 15.0
+    return None
+
+
+def is_valid_ohlc(row: dict, *, require_volume: bool = True) -> bool:
+    """Validate price-bar geometry and basic numeric fields."""
+
+    open_price = safe_float(row.get("open_price"))
+    high_price = safe_float(row.get("high_price"))
+    low_price = safe_float(row.get("low_price"))
+    last_price = safe_float(row.get("last_price"))
+    previous_close = safe_float(row.get("previous_close"), last_price)
+    volume = safe_int(row.get("volume"))
+    if min(open_price, high_price, low_price, last_price) <= 0:
+        return False
+    if previous_close <= 0:
+        return False
+    if require_volume and volume <= 0:
+        return False
+    if high_price < low_price:
+        return False
+    if not (low_price <= open_price <= high_price):
+        return False
+    if not (low_price <= last_price <= high_price):
+        return False
+    return True
+
+
 def is_valid_tick(row: dict) -> bool:
     """Filter obviously invalid quote rows before Kafka/Spark processing."""
 
     market = detect_market(str(row.get("symbol", "")), str(row.get("market", "")))
     symbol = str(row.get("symbol", "")).strip()
     change_pct = safe_float(row.get("change_pct"))
-    volume = safe_int(row.get("volume"))
-    last_price = safe_float(row.get("last_price"))
-    if last_price <= 0 or volume <= 0:
+    if not is_valid_ohlc(row, require_volume=market != "INDEX"):
         return False
-    if market in {"SH", "SZ", "BJ"}:
-        if market == "BJ":
-            return abs(change_pct) < 31
-        if symbol.startswith(("300", "301", "688")):
-            return abs(change_pct) < 21
-        return abs(change_pct) < 11
-    if market == "HK":
-        return abs(change_pct) < 50
-    return False
+    limit = market_change_limit(symbol, market)
+    return limit is not None and abs(change_pct) < limit
+
+
+def normalize_quote_text(row: dict) -> dict:
+    """Fill display metadata so categorical ML features stay stable."""
+
+    result = dict(row)
+    symbol = str(result.get("symbol", "")).strip().upper()
+    result["symbol"] = symbol
+    company_name = str(result.get("company_name") or "").strip()
+    result["company_name"] = company_name or symbol
+    result["category"] = str(result.get("category") or DEFAULT_TEXT["category"]).strip() or DEFAULT_TEXT["category"]
+    result["sector"] = str(result.get("sector") or DEFAULT_TEXT["sector"]).strip() or DEFAULT_TEXT["sector"]
+    result["market"] = detect_market(symbol, str(result.get("market") or ""))
+    return result
 
 
 def safe_float(value: object, default: float = 0.0) -> float:

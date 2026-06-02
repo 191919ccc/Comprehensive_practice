@@ -7,6 +7,7 @@ import python.ml.stock_ml as stock_ml
 from python.ml.model_drift import check_model_drift
 from python.ml.stock_ml import (
     collect_metrics,
+    data_quality_metrics,
     horizon_experiment_metrics,
     load_price_ticks,
     predict_latest_ensemble,
@@ -216,6 +217,7 @@ def main() -> None:
     with log_stage("collect metrics"):
         metrics = collect_metrics(model_results, best_model.name)
         experiment_dataset = model_datasets["lightgbm"] if "lightgbm" in model_datasets else next(iter(model_datasets.values()))
+        metrics.extend(data_quality_metrics(experiment_dataset))
         metrics.extend(threshold_experiment_metrics(experiment_dataset))
         experiment_threshold = float(args.direction_threshold) if args.direction_threshold is not None else float(stock_ml.OPTIMAL_MODEL_CONFIGS["lightgbm"]["direction_threshold"])
         metrics.extend(horizon_experiment_metrics(ticks, index_ticks, experiment_threshold, experiment_horizons))

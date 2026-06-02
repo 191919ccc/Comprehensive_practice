@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from python.common.config import settings
-from python.common.stock_utils import calc_change_pct, detect_market, infer_sector, is_valid_tick, safe_float, safe_int
+from python.common.stock_utils import calc_change_pct, detect_market, infer_sector, is_valid_tick, normalize_quote_text, safe_float, safe_int
 from python.ml.daily_bar_store import DAILY_BAR_COLUMNS, add_trade_date, daily_table_for_source, ensure_daily_bar_tables
 from python.producer.stock_catalog_loader import load_symbols
 
@@ -242,7 +242,7 @@ def normalize_ak_row(symbol_info: dict, row: dict, source: str = "eastmoney", pr
         "event_time": event_time,
         "source": "akshare_cold_start",
     }
-    return quote
+    return normalize_quote_text(quote)
 
 
 def normalize_index_row(index_symbol: str, index_info: dict, row: dict, previous_close_override: float | None = None) -> dict:
@@ -255,7 +255,7 @@ def normalize_index_row(index_symbol: str, index_info: dict, row: dict, previous
     volume = safe_int(row_value(row, "\u6210\u4ea4\u91cf", "volume", "amount"), 1)
     turnover = safe_float(row_value(row, "\u6210\u4ea4\u989d", "amount"))
     event_time = datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d 15:00:00")
-    return {
+    return normalize_quote_text({
         "event_id": f"index-akshare-{index_symbol}-{trade_date}",
         "symbol": index_symbol,
         "company_name": index_info["company_name"],
@@ -273,7 +273,7 @@ def normalize_index_row(index_symbol: str, index_info: dict, row: dict, previous
         "trade_date": datetime.strptime(trade_date, "%Y%m%d").strftime("%Y-%m-%d"),
         "event_time": event_time,
         "source": "akshare_index",
-    }
+    })
 
 
 def fetch_stock_frame(ak, source: str, symbol_info: dict, start: str, end: str, adjust: str, timeout: float):
@@ -344,7 +344,7 @@ def normalize_index_frame(index_symbol: str, index_info: dict, rows: list[dict],
         close_price = safe_float(row_value(row, "\u6536\u76d8", "close"))
         override = previous_close if source == "tencent" and previous_close > 0 else None
         quote = normalize_index_row(index_symbol, index_info, row, previous_close_override=override)
-        if quote["last_price"] > 0:
+        if is_valid_tick(quote):
             quotes.append(quote)
         if close_price > 0:
             previous_close = close_price

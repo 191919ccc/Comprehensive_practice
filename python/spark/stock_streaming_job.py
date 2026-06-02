@@ -79,16 +79,35 @@ def parse_stream(spark: SparkSession):
     )
     parsed = raw.select(F.from_json(F.col("value").cast("string"), event_schema()).alias("data")).select("data.*")
     parsed = parsed.withColumn("event_time", F.to_timestamp("event_time", "yyyy-MM-dd HH:mm:ss"))
-    market = F.upper(F.coalesce(F.col("market"), F.lit("")))
+    parsed = (
+        parsed.withColumn("symbol", F.upper(F.trim(F.coalesce(F.col("symbol"), F.lit("")))))
+        .withColumn("company_name", F.when(F.length(F.trim(F.coalesce(F.col("company_name"), F.lit("")))) > 0, F.trim(F.col("company_name"))).otherwise(F.col("symbol")))
+        .withColumn("category", F.when(F.length(F.trim(F.coalesce(F.col("category"), F.lit("")))) > 0, F.trim(F.col("category"))).otherwise(F.lit("Unknown")))
+        .withColumn("sector", F.when(F.length(F.trim(F.coalesce(F.col("sector"), F.lit("")))) > 0, F.trim(F.col("sector"))).otherwise(F.lit("Other")))
+        .withColumn("market", F.upper(F.trim(F.coalesce(F.col("market"), F.lit("")))))
+    )
+    market = F.col("market")
 
     # Keep only plausible domestic-market quotes. These sanity filters prevent
     # broken source responses from entering MySQL and skewing the dashboard.
     return parsed.filter(
-        (F.col("last_price") > 0)
+        (F.length(F.col("symbol")) > 0)
+        & F.col("event_time").isNotNull()
+        & (F.col("open_price") > 0)
+        & (F.col("high_price") > 0)
+        & (F.col("low_price") > 0)
+        & (F.col("last_price") > 0)
+        & (F.col("previous_close") > 0)
         & (F.col("volume") > 0)
+        & (F.col("high_price") >= F.col("low_price"))
+        & (F.col("open_price") <= F.col("high_price"))
+        & (F.col("open_price") >= F.col("low_price"))
+        & (F.col("last_price") <= F.col("high_price"))
+        & (F.col("last_price") >= F.col("low_price"))
         & (
             (market.isin("SH", "SZ", "BJ") & (F.abs(F.col("change_pct")) < F.lit(11.0)))
-            | ((market == "HK") & (F.abs(F.col("change_pct")) < F.lit(50.0)))
+            | ((market == "HK") & (F.abs(F.col("change_pct")) < F.lit(30.0)))
+            | (market.isin("US", "NASDAQ", "NYSE") & (F.abs(F.col("change_pct")) < F.lit(25.0)))
         )
     )
 

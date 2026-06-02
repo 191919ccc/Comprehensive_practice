@@ -33,6 +33,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from python.common.config import settings
+from python.common.stock_utils import market_change_limit
 from python.ml.daily_bar_store import DAILY_BAR_SELECT_COLUMNS, daily_table_for_source, ensure_daily_bar_tables
 
 
@@ -288,6 +289,87 @@ def numeric_series(frame: pd.DataFrame, column: str, default: float = 0.0) -> pd
     if column not in frame.columns:
         return pd.Series(default, index=frame.index, dtype=float)
     return pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(default)
+
+
+def clean_price_frame(df: pd.DataFrame, context: str = "training") -> pd.DataFrame:
+    """Clean quote/daily-bar rows before feature engineering.
+
+    Storage keeps market snapshots for display, but model training needs a
+    stricter OHLC-consistent view. The report is attached to ``attrs`` so the
+    training script can persist quality metrics with the model version.
+    """
+    if df.empty:
+        result = df.copy()
+        result.attrs["quality_report"] = {"input_rows": 0.0, "output_rows": 0.0, "dropped_rows": 0.0}
+        return result
+
+    frame = df.copy()
+    input_rows = len(frame)
+    for text_column, default in (("symbol", ""), ("company_name", ""), ("category", "Unknown"), ("sector", "Other"), ("market", "UNKNOWN"), ("source", "")):
+        if text_column not in frame.columns:
+            frame[text_column] = default
+        frame[text_column] = frame[text_column].fillna(default).astype(str).str.strip()
+    frame["symbol"] = frame["symbol"].str.upper()
+    frame["company_name"] = frame["company_name"].where(frame["company_name"] != "", frame["symbol"])
+    frame["category"] = frame["category"].where(frame["category"] != "", "Unknown")
+    frame["sector"] = frame["sector"].where(frame["sector"] != "", "Other")
+    frame["market"] = frame["market"].str.upper().where(frame["market"] != "", "UNKNOWN")
+    if "event_time" not in frame.columns:
+        frame["event_time"] = pd.NaT
+    frame["event_time"] = pd.to_datetime(frame["event_time"], errors="coerce")
+
+    for column in RAW_NUMERIC_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = 0.0
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    invalid_time = frame["event_time"].isna()
+    invalid_identity = frame["symbol"].eq("")
+    invalid_price = (
+        frame[["open_price", "high_price", "low_price", "last_price", "previous_close"]].isna().any(axis=1)
+        | (frame[["open_price", "high_price", "low_price", "last_price", "previous_close"]] <= 0).any(axis=1)
+    )
+    invalid_volume = frame["volume"].isna() | (frame["volume"] <= 0)
+    invalid_ohlc = (
+        (frame["high_price"] < frame["low_price"])
+        | (frame["open_price"] > frame["high_price"])
+        | (frame["open_price"] < frame["low_price"])
+        | (frame["last_price"] > frame["high_price"])
+        | (frame["last_price"] < frame["low_price"])
+    )
+    limits = frame.apply(lambda row: market_change_limit(str(row["symbol"]), str(row["market"])), axis=1)
+    limits = pd.to_numeric(limits, errors="coerce")
+    invalid_change = limits.isna() | frame["change_pct"].isna() | (frame["change_pct"].abs() >= limits)
+
+    valid_mask = ~(invalid_time | invalid_identity | invalid_price | invalid_volume | invalid_ohlc | invalid_change)
+    cleaned = frame[valid_mask].sort_values(["symbol", "event_time"]).copy()
+    before_dedup = len(cleaned)
+    cleaned = cleaned.drop_duplicates(["symbol", "event_time", "source"], keep="last").copy()
+    report = {
+        "input_rows": float(input_rows),
+        "output_rows": float(len(cleaned)),
+        "dropped_rows": float(input_rows - len(cleaned)),
+        "invalid_time_rows": float(invalid_time.sum()),
+        "invalid_identity_rows": float(invalid_identity.sum()),
+        "invalid_price_rows": float(invalid_price.sum()),
+        "invalid_volume_rows": float(invalid_volume.sum()),
+        "invalid_ohlc_rows": float(invalid_ohlc.sum()),
+        "invalid_change_rows": float(invalid_change.sum()),
+        "duplicate_rows": float(before_dedup - len(cleaned)),
+    }
+    cleaned.attrs["quality_report"] = report
+    if report["dropped_rows"] > 0:
+        print(
+            "[ml] data quality "
+            f"{context}: rows {input_rows} -> {len(cleaned)}, "
+            f"drop={int(report['dropped_rows'])}, "
+            f"ohlc={int(report['invalid_ohlc_rows'])}, "
+            f"volume={int(report['invalid_volume_rows'])}, "
+            f"change={int(report['invalid_change_rows'])}, "
+            f"dup={int(report['duplicate_rows'])}",
+            flush=True,
+        )
+    return cleaned
 
 
 def downside_risk_score(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -762,9 +844,11 @@ def merge_index_features(df: pd.DataFrame, index_df: pd.DataFrame | None = None)
     return result
 
 
-def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = None) -> pd.DataFrame:
+def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = None, *, already_clean: bool = False) -> pd.DataFrame:
     """Add trend features used by the LSTM branch."""
-    sorted_df = df.sort_values(["symbol", "event_time"]).copy()
+    cleaned_df = df.copy() if already_clean else clean_price_frame(df, context="feature_engineering")
+    quality_report = dict(cleaned_df.attrs.get("quality_report", {}))
+    sorted_df = cleaned_df.sort_values(["symbol", "event_time"]).copy()
     for price_column in ("open_price", "high_price", "low_price"):
         if price_column not in sorted_df.columns:
             sorted_df[price_column] = sorted_df.get("last_price", 0)
@@ -924,6 +1008,7 @@ def add_technical_features(df: pd.DataFrame, index_df: pd.DataFrame | None = Non
         sorted_df.loc[index, "volume_price_corr"] = group["volume"].rolling(5, min_periods=3).corr(group["last_price"]).fillna(0)
     for column in SEQUENCE_FEATURES:
         sorted_df[column] = pd.to_numeric(sorted_df[column], errors="coerce").replace([np.inf, -np.inf], 0).fillna(0).clip(-5, 5)
+    sorted_df.attrs["quality_report"] = quality_report
     return sorted_df
 
 
@@ -977,7 +1062,9 @@ def prepare_dataset(
     exactly three wall-clock minutes.
     """
     horizon = max(1, int(prediction_horizon if prediction_horizon is not None else PREDICTION_HORIZON))
-    sorted_df = add_technical_features(collapse_repeated_price_ticks(select_training_sources(df)), index_df)
+    cleaned_input = clean_price_frame(df, context="training_input")
+    sorted_df = add_technical_features(collapse_repeated_price_ticks(select_training_sources(cleaned_input)), index_df, already_clean=True)
+    sorted_df.attrs["quality_report"] = dict(cleaned_input.attrs.get("quality_report", {}))
     sorted_df["next_price"] = sorted_df.groupby("symbol")["last_price"].shift(-horizon)
     sorted_df["next_return"] = np.where(
         sorted_df["last_price"].abs() > 1e-8,
@@ -1099,6 +1186,29 @@ def threshold_experiment_metrics(dataset: pd.DataFrame) -> list[tuple[str, str, 
     return metrics
 
 
+def data_quality_metrics(dataset: pd.DataFrame, prefix: str = "training_data") -> list[tuple[str, str, float]]:
+    """Expose training data cleaning results as model metrics."""
+    report = dataset.attrs.get("quality_report", {}) if hasattr(dataset, "attrs") else {}
+    metrics: list[tuple[str, str, float]] = []
+    for key in (
+        "input_rows",
+        "output_rows",
+        "dropped_rows",
+        "invalid_time_rows",
+        "invalid_identity_rows",
+        "invalid_price_rows",
+        "invalid_volume_rows",
+        "invalid_ohlc_rows",
+        "invalid_change_rows",
+        "duplicate_rows",
+    ):
+        if key in report:
+            metrics.append((prefix, key, float(report[key])))
+    if report.get("input_rows"):
+        metrics.append((prefix, "drop_ratio", float(report.get("dropped_rows", 0.0)) / float(report["input_rows"])))
+    return metrics
+
+
 def horizon_experiment_metrics(
     df: pd.DataFrame,
     index_df: pd.DataFrame | None,
@@ -1160,6 +1270,7 @@ def limit_training_dataset(dataset: pd.DataFrame) -> pd.DataFrame:
     limited = pd.concat(limited_parts).sort_values(["symbol", "event_time"]).copy()
     if len(limited) > max_rows:
         limited = limited.sort_values("event_time").tail(max_rows).copy()
+    limited.attrs.update(dataset.attrs)
     print(f"[ml] limit training rows {len(dataset)} -> {len(limited)}", flush=True)
     return limited
 
@@ -1402,6 +1513,7 @@ def train_tabular_models(
             "calibration_down_recall",
             "calibration_down_precision",
             "calibration_predicted_down_ratio",
+            "calibration_max_down_coverage",
         ):
             if key in decision_params:
                 decision_metrics[f"{name}_{key}"] = float(decision_params[key])
@@ -1935,6 +2047,7 @@ def train_lstm(dataset: pd.DataFrame) -> ModelResult:
             "calibration_down_recall",
             "calibration_down_precision",
             "calibration_predicted_down_ratio",
+            "calibration_max_down_coverage",
         ):
             if key in decision_params:
                 decision_metrics[f"lstm_{key}"] = float(decision_params[key])
@@ -2282,6 +2395,8 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
     counts = np.bincount(y_true, minlength=len(DIRECTION_LABELS))
     majority_label = int(counts.argmax())
     baseline_accuracy = float(counts.max() / max(y_true.size, 1))
+    actual_down_ratio = float(counts[DIRECTION_DOWN] / max(y_true.size, 1))
+    max_down_coverage = min(0.42, max(0.12, actual_down_ratio * 1.15))
 
     def candidate_metrics(predictions: np.ndarray) -> dict[str, float]:
         accuracy = float(accuracy_score(y_true, predictions))
@@ -2297,16 +2412,18 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
         predicted_down_ratio = down_predicted / float(max(y_true.size, 1))
         if RISK_TARGET_ENABLED:
             score = (
-                down_recall * 0.42
-                + down_precision * 0.24
+                down_precision * 0.36
+                + down_recall * 0.28
                 + balanced * 0.18
                 + macro_f1 * 0.10
-                + max(lift, -0.20) * 0.06
+                + max(lift, -0.20) * 0.08
             )
             if predicted_down_ratio < 0.03:
                 score -= (0.03 - predicted_down_ratio) * 2.0
-            if predicted_down_ratio > 0.45:
-                score -= (predicted_down_ratio - 0.45) * 1.0
+            if predicted_down_ratio > max_down_coverage:
+                score -= (predicted_down_ratio - max_down_coverage) * 3.5
+            if down_precision < 0.35 and predicted_down_ratio > actual_down_ratio:
+                score -= (0.35 - down_precision) * 1.5
         else:
             score = balanced * 0.45 + macro_f1 * 0.30 + max(lift, -0.20) * 0.25
             if lift < 0:
@@ -2325,8 +2442,8 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
     base_predictions = direction_from_probabilities(probabilities).to_numpy(dtype=int)
     best_metrics = candidate_metrics(base_predictions)
     best_params: dict[str, Any] | None = {"mode": "argmax"}
-    for min_direction_prob in (0.34, 0.38, 0.42, 0.46, 0.50, 0.55, 0.60):
-        for min_direction_margin in (-0.08, -0.04, 0.0, 0.04, 0.08, 0.12):
+    for min_direction_prob in (0.34, 0.38, 0.42, 0.46, 0.50, 0.55, 0.60, 0.66, 0.72, 0.78):
+        for min_direction_margin in (-0.04, 0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24):
             params = {
                 "mode": "direction_gate",
                 "min_direction_prob": float(min_direction_prob),
@@ -2340,8 +2457,9 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
     if best_metrics["lift"] >= BASELINE_GUARD_LIFT_FLOOR or (
         RISK_TARGET_ENABLED
         and best_metrics["down_recall"] > 0
-        and best_metrics["down_precision"] >= 0.10
+        and best_metrics["down_precision"] >= 0.30
         and best_metrics["predicted_down_ratio"] >= 0.03
+        and best_metrics["predicted_down_ratio"] <= max_down_coverage + 0.05
     ):
         return {
             **(best_params or {"mode": "argmax"}),
@@ -2351,6 +2469,7 @@ def tune_direction_decision_params(probabilities: pd.DataFrame, true_labels: np.
             "calibration_down_recall": best_metrics["down_recall"],
             "calibration_down_precision": best_metrics["down_precision"],
             "calibration_predicted_down_ratio": best_metrics["predicted_down_ratio"],
+            "calibration_max_down_coverage": max_down_coverage,
         }
     return {
         "mode": "majority_class",
@@ -2383,10 +2502,11 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
     low_confidence_up = (result["predicted_signal"] == "UP") & (confidence < up_threshold)
     low_confidence_down = (result["predicted_signal"] == "DOWN") & (confidence < down_threshold)
     weak_down_return = pd.Series(False, index=result.index)
+    predicted_return = None
     if "predicted_return" in result.columns:
         predicted_return = pd.to_numeric(result["predicted_return"], errors="coerce").fillna(0.0)
-        down_return_floor = -RISK_ALERT_MIN_RETURN if RISK_TARGET_ENABLED else -movement_threshold
-        weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > down_return_floor)
+        if not RISK_TARGET_ENABLED:
+            weak_down_return = (result["predicted_signal"] == "DOWN") & (predicted_return > -movement_threshold)
     weak_down_evidence = pd.Series(False, index=result.index)
     if RISK_TARGET_ENABLED:
         down_score, evidence_count = downside_risk_score(result)
@@ -2396,6 +2516,13 @@ def apply_alert_confidence_filter(frame: pd.DataFrame, movement_threshold: float
         result["technical_risk_score"] = down_score
         result["sequence_risk_score"] = numeric_series(result, "sequence_risk_score").clip(0, 1)
         result["final_risk_score"] = down_score
+        if predicted_return is not None:
+            strong_risk_evidence = (down_score >= max(DOWN_ALERT_RISK_SCORE_THRESHOLD + 0.12, 0.67)) & (evidence_count >= 2)
+            weak_down_return = (
+                (result["predicted_signal"] == "DOWN")
+                & (predicted_return > -RISK_ALERT_MIN_RETURN)
+                & ~strong_risk_evidence
+            )
         weak_down_evidence = (result["predicted_signal"] == "DOWN") & (
             (down_score < DOWN_ALERT_RISK_SCORE_THRESHOLD) | (evidence_count < 1)
         )
