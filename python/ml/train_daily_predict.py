@@ -147,6 +147,70 @@ def parse_int_list(value: str) -> list[int]:
     return items
 
 
+def metric_lookup(metrics: list[tuple[str, str, float]]) -> dict[tuple[str, str], float]:
+    """Build a stable lookup for collected metric tuples."""
+    return {(model_name, metric_name): float(metric_value) for model_name, metric_name, metric_value in metrics}
+
+
+def append_training_quality_gate(metrics: list[tuple[str, str, float]]) -> dict[str, float]:
+    """Append pass/fail metrics for the production risk-training gate."""
+    lookup = metric_lookup(metrics)
+    lightgbm_lift = lookup.get(("lightgbm", "walk_forward_direction_lift_over_baseline"), -1.0)
+    lightgbm_precision = lookup.get(("lightgbm", "walk_forward_down_precision"), 0.0)
+    lightgbm_coverage = lookup.get(("lightgbm", "walk_forward_predicted_down_ratio"), 1.0)
+    lightgbm_weight = lookup.get(("ensemble", "lightgbm_weight"), 1.0)
+    lstm_weight = lookup.get(("ensemble", "lstm_weight"), 0.0)
+    drop_ratio = lookup.get(("training_data", "drop_ratio"), 0.0)
+
+    checks = {
+        "lightgbm_lift_ok": 1.0 if lightgbm_lift > 0 else 0.0,
+        "lightgbm_down_precision_ok": 1.0 if lightgbm_precision >= 0.55 else 0.0,
+        "lightgbm_down_coverage_ok": 1.0 if 0.03 <= lightgbm_coverage <= 0.35 else 0.0,
+        "lightgbm_weight_ok": 1.0 if lightgbm_weight >= 0.95 else 0.0,
+        "training_drop_ratio_ok": 1.0 if drop_ratio <= 0.05 else 0.0,
+    }
+    passed = 1.0 if all(value >= 1.0 for value in checks.values()) else 0.0
+    gate_metrics = {
+        "passed": passed,
+        "lightgbm_walk_forward_lift": lightgbm_lift,
+        "lightgbm_walk_forward_down_precision": lightgbm_precision,
+        "lightgbm_walk_forward_predicted_down_ratio": lightgbm_coverage,
+        "ensemble_lightgbm_weight": lightgbm_weight,
+        "ensemble_lstm_weight": lstm_weight,
+        "training_data_drop_ratio": drop_ratio,
+        **checks,
+    }
+    metrics.extend(("quality_gate", name, value) for name, value in gate_metrics.items())
+    return gate_metrics
+
+
+def print_training_quality_summary(metrics: list[tuple[str, str, float]], predictions) -> None:
+    """Print the key post-training evidence instead of only a long metric list."""
+    lookup = metric_lookup(metrics)
+    gate_passed = lookup.get(("quality_gate", "passed"), 0.0) >= 1.0
+    status = "PASS" if gate_passed else "FAIL"
+    print(f"[daily-ml] quality_gate={status}", flush=True)
+    for model_name, metric_name in (
+        ("lightgbm", "walk_forward_direction_lift_over_baseline"),
+        ("lightgbm", "walk_forward_down_precision"),
+        ("lightgbm", "walk_forward_predicted_down_ratio"),
+        ("lightgbm", "calibration_down_precision"),
+        ("ensemble", "lightgbm_weight"),
+        ("ensemble", "lstm_weight"),
+        ("training_data", "drop_ratio"),
+    ):
+        if (model_name, metric_name) in lookup:
+            print(f"[daily-ml]   {model_name}.{metric_name}={lookup[(model_name, metric_name)]:.4f}", flush=True)
+    if predictions is not None and not predictions.empty:
+        raw_counts = predictions.get("predicted_signal", stock_ml.pd.Series(dtype=str)).value_counts().to_dict()
+        alert_counts = predictions.get("alert_signal", stock_ml.pd.Series(dtype=str)).value_counts().to_dict()
+        avg_risk = float(predictions.get("final_risk_score", stock_ml.pd.Series([0.0])).mean())
+        max_risk = float(predictions.get("final_risk_score", stock_ml.pd.Series([0.0])).max())
+        print(f"[daily-ml]   latest_raw_signal_counts={raw_counts}", flush=True)
+        print(f"[daily-ml]   latest_alert_signal_counts={alert_counts}", flush=True)
+        print(f"[daily-ml]   latest_risk_score_avg={avg_risk:.4f}, max={max_risk:.4f}", flush=True)
+
+
 def main() -> None:
     """Train the daily-bar ML pipeline from daily stock and index bars."""
     args = parse_args()
@@ -221,7 +285,9 @@ def main() -> None:
         metrics.extend(threshold_experiment_metrics(experiment_dataset))
         experiment_threshold = float(args.direction_threshold) if args.direction_threshold is not None else float(stock_ml.OPTIMAL_MODEL_CONFIGS["lightgbm"]["direction_threshold"])
         metrics.extend(horizon_experiment_metrics(ticks, index_ticks, experiment_threshold, experiment_horizons))
+        append_training_quality_gate(metrics)
     print(f"[daily-ml] collected metrics count={len(metrics)}", flush=True)
+    print_training_quality_summary(metrics, predictions)
 
     if args.no_write:
         drift_result = {"skipped": True, "reason": "no-write"}

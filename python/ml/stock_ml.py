@@ -473,6 +473,8 @@ def validation_baseline_guard(
     """
     true_values = np.asarray(y_true, dtype=int)
     pred_values = np.asarray(y_pred, dtype=int)
+    if RISK_TARGET_ENABLED:
+        pred_values = np.where(pred_values == DIRECTION_UP, DIRECTION_FLAT, pred_values)
     params: dict[str, Any] = dict(decision_params or {"mode": "argmax"})
     if true_values.size == 0:
         return pred_values, params, {}
