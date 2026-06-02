@@ -173,10 +173,10 @@ mvn -q -DskipTests package
 
 ## 机器学习模型
 
-当前日线预测生产组合默认使用两类模型：
+当前日线模型已经调整为“下跌风险识别”口径，不再按传统三分类强行预测看多/看空/观望。生产组合默认训练两类模型：
 
-- `lightgbm`：LightGBM 梯度提升树，适合结构化表格行情特征，通常比随机森林更强。
-- `lstm`：LSTM 时间序列模型，使用每只股票连续多条行情学习短期变化趋势。
+- `lightgbm`：正式风险识别主模型，使用清洗后的日线、指数、行业相对强弱、波动率和成交量特征。
+- `lstm`：保留为辅助序列模型并记录指标；如果 walk-forward 负提升或风险覆盖率失控，会被自动剔除出 ensemble 权重。
 
 `random_forest` 仍保留在代码中作为可选实验模型，但默认训练和写库不再启用，避免完整校准和 walk-forward 评估拖慢正式训练。
 
@@ -186,8 +186,23 @@ mvn -q -DskipTests package
 $env:ML_MAX_TRAIN_ROWS='120000'
 $env:ML_LSTM_EPOCHS='60'
 $env:ML_LSTM_MAX_SEQUENCES='80000'
-$env:ML_PREDICTION_RETURN_SIGNAL_THRESHOLD='0.003'
-D:\anaconda3\envs\MachineLearn\python.exe -m python.ml.train_daily_predict --version-label daily-best
+$env:ML_LSTM_AUX_MAX_WEIGHT='0.10'
+$env:ML_LIGHTGBM_MIN_WEIGHT='0.85'
+D:\anaconda3\envs\MachineLearn\python.exe -m python.ml.train_daily_predict --version-label clean-risk --models lightgbm,lstm --prediction-horizon 5 --horizon-experiments 1,3,5
+```
+
+正式训练会执行质量门禁。只有 `quality_gate=PASS` 时才会保存模型并写入 MySQL；如果门禁失败，会在写库前退出，避免坏模型覆盖当前结果。调试时如必须绕过，可追加 `--allow-quality-gate-fail`，正式演示不要使用这个参数。
+
+训练完成后必须运行只读验证：
+
+```powershell
+D:\anaconda3\envs\MachineLearn\python.exe -m python.ml.verify_training_quality --version-prefix clean-risk
+```
+
+通过时应看到：
+
+```text
+[verify-ml] quality_gate=PASS
 ```
 
 训练前会检查 `daily_stock_bars` 和 `daily_index_bars` 的最新交易日期。默认超过 `ML_MAX_DAILY_DATA_AGE_DAYS=10` 天会停止训练，避免用过期日线生成看似最新的预测。调试时如必须绕过，可临时追加：
@@ -202,23 +217,22 @@ $env:ML_ALLOW_STALE_DAILY_DATA='true'
 $env:ML_MAX_TRAIN_ROWS='15000'
 $env:ML_LSTM_EPOCHS='5'
 $env:ML_LSTM_MAX_SEQUENCES='30000'
-D:\anaconda3\envs\MachineLearn\python.exe -m python.ml.train_daily_predict --version-label daily-test --models lightgbm,lstm --no-write
+$env:ML_LSTM_AUX_MAX_WEIGHT='0.10'
+$env:ML_LIGHTGBM_MIN_WEIGHT='0.85'
+D:\anaconda3\envs\MachineLearn\python.exe -m python.ml.train_daily_predict --version-label clean-risk-check --models lightgbm,lstm --prediction-horizon 5 --horizon-experiments 1,3,5 --no-write
 ```
 
-训练流程会从 MySQL 的 `daily_stock_bars` 和 `daily_index_bars` 读取日线行情与指数特征，按模型阈值构造下一阶段收益和方向标签。当前生产组合训练 LightGBM 与 LSTM，并输出 ensemble 预测到 `ml_predictions`、历史预测到 `ml_prediction_history`、模型指标到 `ml_model_metrics`。
+训练流程会从 MySQL 的 `daily_stock_bars` 和 `daily_index_bars` 读取日线行情与指数特征。数据会先经过统一清洗、选源、去重和 OHLC 合法性检查，再生成技术特征。当前标签目标是未来 5 个交易日是否存在下跌风险，模型指标写入 `ml_model_metrics`，预测写入 `ml_predictions` 和 `ml_prediction_history`。
 
 当前方向信号分为两类：
 
 - `predicted_signal`：模型原始预测方向，用于模型漂移检测和预测历史评估。
 - `alert_signal`：经过置信度过滤后的告警侧信号，用于控制模型告警误报。
 
-为避免“价格预测向下但方向信号仍为 WATCH/UP”的不一致，系统增加了预测收益校正规则：当 `predicted_return >= 0.003` 时最终信号校正为 `UP`，当 `predicted_return <= -0.003` 时最终信号校正为 `DOWN`。阈值可通过 `ML_PREDICTION_RETURN_SIGNAL_THRESHOLD` 调整。
+当前风险目标模式下，UP 预测会统一归并为 WATCH，前端展示应按“风险/观望”理解模型输出。
 
-最近一次已验证训练版本：
+当前数据库里旧正式模型仍未通过新门禁，重新训练前会看到：
 
 ```text
-version=daily-best-bestparams-20260529182104
-prediction_model=ensemble
-best_non_baseline_model=lightgbm
-drift_check={accuracy: 0.60, threshold: 0.55, drift: false}
+[verify-ml] quality_gate=FAIL
 ```
